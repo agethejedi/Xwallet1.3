@@ -1,485 +1,253 @@
-// use the globals set in index.html
+// ========================================================
+// X-Wallet v1.3 — Control Center build by RiskXLabs
+// Multi-wallet support + SafeSend + TX History (no USD values)
+// ========================================================
 const { ethers } = window;
 const XMTP = window.XMTP || window.xmtp;
 
-/* ================================
-   CONFIG
-================================ */
+/* =============== CONFIG =============== */
 const RPCS = {
-  sep: 'https://eth-sepolia.g.alchemy.com/v2/kxHg5y9yBXWAb9cOcJsf0', // <-- replace
+  sep: 'https://eth-sepolia.g.alchemy.com/v2/REPLACE_WITH_YOUR_KEY',
 };
 
-// IMPORTANT: point to your Cloudflare Worker /check endpoint
-const SAFE_SEND_URL = 'https://xwalletv1dot2.agedotcom.workers.dev/check'; // <-- replace
-const WORKER_BASE   = SAFE_SEND_URL.replace(/\/check$/, ''); // used for /market/price
+const SAFE_SEND_URL = 'https://xwalletv1dot2.agedotcom.workers.dev/check';
+const WORKER_BASE = SAFE_SEND_URL.replace(/\/check$/, '');
 
-/* ================================
-   Tiny helpers
-================================ */
-const $  = (q) => document.querySelector(q);
-const $$ = (q) => [...document.querySelectorAll(q)];
+/* =============== Helpers =============== */
+const $  = (q)=>document.querySelector(q);
+const $$ = (q)=>[...document.querySelectorAll(q)];
 
-/* ================================
-   AES-GCM + PBKDF2 vault
-================================ */
+/* =============== AES Vault =============== */
 async function aesEncrypt(password, plaintext){
-  const enc  = new TextEncoder();
+  const enc = new TextEncoder();
   const salt = crypto.getRandomValues(new Uint8Array(16));
-  const iv   = crypto.getRandomValues(new Uint8Array(12));
-  const km   = await crypto.subtle.importKey('raw', enc.encode(password), {name:'PBKDF2'}, false, ['deriveKey']);
-  const key  = await crypto.subtle.deriveKey({name:'PBKDF2', salt, iterations:100000, hash:'SHA-256'}, km, {name:'AES-GCM', length:256}, false, ['encrypt']);
-  const ct   = new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM', iv}, key, enc.encode(plaintext)));
-  return { ct: Array.from(ct), iv: Array.from(iv), salt: Array.from(salt) };
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const km = await crypto.subtle.importKey('raw', enc.encode(password), {name:'PBKDF2'}, false, ['deriveKey']);
+  const key = await crypto.subtle.deriveKey({name:'PBKDF2', salt, iterations:100000, hash:'SHA-256'}, km, {name:'AES-GCM', length:256}, false, ['encrypt']);
+  const ct = new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM', iv}, key, enc.encode(plaintext)));
+  return { ct:Array.from(ct), iv:Array.from(iv), salt:Array.from(salt) };
 }
 async function aesDecrypt(password, payload){
   const dec = new TextDecoder();
   const { ct, iv, salt } = payload;
-  const km   = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), {name:'PBKDF2'}, false, ['deriveKey']);
-  const key  = await crypto.subtle.deriveKey({name:'PBKDF2', salt:new Uint8Array(salt), iterations:100000, hash:'SHA-256'}, km, {name:'AES-GCM', length:256}, false, ['decrypt']);
-  const pt   = await crypto.subtle.decrypt({name:'AES-GCM', iv:new Uint8Array(iv)}, key, new Uint8Array(ct));
+  const km = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), {name:'PBKDF2'}, false, ['deriveKey']);
+  const key = await crypto.subtle.deriveKey({name:'PBKDF2', salt:new Uint8Array(salt), iterations:100000, hash:'SHA-256'}, km, {name:'AES-GCM', length:256}, false, ['decrypt']);
+  const pt = await crypto.subtle.decrypt({name:'AES-GCM', iv:new Uint8Array(iv)}, key, new Uint8Array(ct));
   return dec.decode(pt);
 }
 
-/* ================================
-   State / storage / lock
-================================ */
+/* =============== State =============== */
+const STORAGE_KEY = 'xwallet_vault_v1.3';
+const COUNT_KEY   = 'xwallet_account_count';
+
 const state = {
-  unlocked:false, wallet:null, xmtp:null, provider:null, signer:null,
-  inactivityTimer:null, decryptedPhrase:null,
-  watchlist: ['bitcoin','ethereum','solana','matic-network','usd-coin'],
+  unlocked:false, decryptedPhrase:null,
+  accounts:[], activeIndex:0,
+  provider:null, signer:null,
+  inactivityTimer:null,
 };
-const STORAGE_KEY = 'xwallet_vault_v1.2';
-function getVault(){ const s = localStorage.getItem(STORAGE_KEY); return s ? JSON.parse(s) : null; }
+
+function getVault(){ const s = localStorage.getItem(STORAGE_KEY); return s?JSON.parse(s):null; }
 function setVault(v){ localStorage.setItem(STORAGE_KEY, JSON.stringify(v)); }
+function getAccountCount(){ return Number(localStorage.getItem(COUNT_KEY) || 1); }
+function setAccountCount(n){ localStorage.setItem(COUNT_KEY, String(n)); }
 
 function lock(){
-  state.unlocked=false;
-  state.wallet=null;
-  state.xmtp=null;
-  state.provider=null;
-  state.signer=null;
-  state.decryptedPhrase=null;
-  if (window._xmtpStreamCancel) { window._xmtpStreamCancel(); window._xmtpStreamCancel = null; }
+  state.unlocked=false; state.decryptedPhrase=null; state.accounts=[];
+  state.signer=null; state.provider=null;
   $('#lockState').textContent='Locked';
 }
-function scheduleAutoLock(){ clearTimeout(state.inactivityTimer); state.inactivityTimer = setTimeout(()=>{ lock(); showLock(); }, 10*60*1000); }
-
-/* ================================
-   XMTP helpers (init + inbox)
-================================ */
-async function ensureXMTP() {
-  if (state.xmtp) return state.xmtp;
-  if (!state.wallet) throw new Error('Unlock first');
-  state.xmtp = await XMTP.Client.create(state.wallet, { env: 'production' });
-  return state.xmtp;
+function scheduleAutoLock(){
+  clearTimeout(state.inactivityTimer);
+  state.inactivityTimer=setTimeout(()=>{lock();showLock();},10*60*1000);
 }
 
-async function loadInbox() {
-  const inboxEl = $('#inbox');
-  if (!inboxEl) return;
-  if (!state.xmtp) { inboxEl.textContent = 'Connect wallet (Unlock) first.'; return; }
-
-  const convos = await state.xmtp.conversations.list();
-  const latest = [];
-  for (const c of convos.slice(0, 20)) {
-    const msgs = await c.messages({ pageSize: 1, direction: 'descending' });
-    if (msgs.length) latest.push({ peer: c.peerAddress, text: msgs[0].content, at: msgs[0].sent });
-  }
-  latest.sort((a,b)=> b.at - a.at);
-  inboxEl.innerHTML =
-    latest.map(m =>
-      `<div class="kv"><div>${m.peer}</div><div>${new Date(m.at).toLocaleString()}</div></div>
-       <div class="small">${m.text}</div><hr class="sep"/>`
-    ).join('') || 'No messages yet.';
+/* =============== Wallet Derivation =============== */
+function deriveAccountFromPhrase(phrase,index){
+  const path = `m/44'/60'/0'/0/${index}`;
+  return ethers.HDNodeWallet.fromPhrase(phrase,undefined,path);
 }
 
-/* ================================
-   Watchlist via Worker (/market/price)
-================================ */
-let _watchlistTimer = null;
-
-async function fetchPrices(ids) {
-  const u = new URL(WORKER_BASE + '/market/price');
-  u.searchParams.set('ids', ids.join(','));   // e.g., "bitcoin,ethereum,solana,matic-network,usd-coin"
-  u.searchParams.set('vs', 'usd');
-
-  const r = await fetch(u.toString());
-  if (!r.ok) {
-    const text = await r.text().catch(() => '');
-    console.error('watchlist fetch failed', r.status, text);
-    throw new Error('Worker market error');
-  }
-  return r.json(); // { bitcoin:{usd,...}, ... }
-}
-
-
-function ensureWatchlistRows() {
-  const tbody = document.querySelector('#watchlist tbody');
-  if (!tbody) return;
-  if (tbody.children.length) return;
-  tbody.innerHTML = state.watchlist.map(id=>`
-    <tr data-id="${id}">
-      <td class="mono">${id}</td>
-      <td class="mono price">—</td>
-      <td class="mono change">—</td>
-    </tr>
-  `).join('');
-}
-
-function updateWatchlistDOM(prices) {
-  for (const id of state.watchlist) {
-    const row = document.querySelector(`#watchlist tr[data-id="${id}"]`);
-    if (!row) continue;
-    const p = prices[id];
-    const priceEl = row.querySelector('.price');
-    const chEl    = row.querySelector('.change');
-
-    if (!p) {
-      if (priceEl) priceEl.textContent = '—';
-      if (chEl) chEl.textContent = '—';
-      continue;
-    }
-    const usd = p.usd ?? p.price ?? null;
-    const ch  = p.usd_24h_change ?? p.change24h ?? null;
-
-    if (priceEl && usd != null) {
-      priceEl.textContent = Number(usd).toLocaleString(undefined, { style:'currency', currency:'USD' });
-    }
-    if (chEl && ch != null) {
-      const pct = Number(ch).toFixed(2) + '%';
-      chEl.textContent = pct;
-      chEl.style.color = Number(ch) >= 0 ? 'limegreen' : 'crimson';
-    }
+/* =============== SafeSend Fetch =============== */
+async function fetchSafeSend(address){
+  try{
+    const u=new URL(SAFE_SEND_URL);
+    u.searchParams.set('address',address);
+    u.searchParams.set('chain','sepolia');
+    const r=await fetch(u.toString());
+    if(!r.ok) throw new Error('SafeSend backend error');
+    return await r.json();
+  }catch(e){
+    console.warn('SafeSend fetch failed',e);
+    return {score:50,findings:['SafeSend backend unreachable']};
   }
 }
 
-async function updateWatchlistOnce(){
-  try {
-    ensureWatchlistRows();
-    const data = await fetchPrices(state.watchlist);
-    updateWatchlistDOM(data);
-  } catch (e) {
-    console.warn('watchlist update failed', e);
-  }
+/* =============== Provider / Send =============== */
+async function getProvider(chain='sep'){return new ethers.JsonRpcProvider(RPCS[chain]);}
+function setActiveSigner(){
+  const acc = state.accounts.find(a=>a.index===state.activeIndex);
+  if(!acc) throw new Error('No active account');
+  const provider = state.provider || new ethers.JsonRpcProvider(RPCS.sep);
+  state.signer = acc.wallet.connect(provider);
+}
+async function sendEth({to,amountEth,chain='sep'}){
+  if(!state.signer) setActiveSigner();
+  const tx={to,value:ethers.parseEther(String(amountEth))};
+  const fee=await state.signer.getFeeData();
+  if(fee?.maxFeePerGas){tx.maxFeePerGas=fee.maxFeePerGas;tx.maxPriorityFeePerGas=fee.maxPriorityFeePerGas;}
+  const est=await state.signer.estimateGas(tx); tx.gasLimit=est;
+  const sent=await state.signer.sendTransaction(tx); await sent.wait(1);
+  return {hash:sent.hash};
 }
 
-function startWatchlist(){
-  clearInterval(_watchlistTimer);
-  updateWatchlistOnce();
-  _watchlistTimer = setInterval(updateWatchlistOnce, 60_000);
+/* =============== Load TXs (via Worker) =============== */
+async function loadRecentTxsForActive(){
+  try{
+    const acc=state.accounts.find(a=>a.index===state.activeIndex);
+    if(!acc) return;
+    const u=new URL(WORKER_BASE+'/account/txs');
+    u.searchParams.set('address',acc.address);
+    u.searchParams.set('chain','sepolia');
+    const r=await fetch(u.toString());
+    if(!r.ok) throw new Error('txs backend error');
+    const j=await r.json();
+    const list=(j.txs||[]).slice(0,10);
+    $('#txList').innerHTML=list.map(t=>{
+      const when=t.timeStamp?new Date(Number(t.timeStamp)*1000).toLocaleString():'';
+      return `<div><a target=_blank href="https://sepolia.etherscan.io/tx/${t.hash}">${t.hash.slice(0,10)}…</a> • ${when}</div>`;
+    }).join('')||'No txs';
+  }catch(e){console.warn(e);$('#txList').textContent='Recent txs unavailable.';}
 }
 
-/* ================================
-   Views
-================================ */
-const VIEWS = {
-  dashboard(){ 
-    const hasVault = !!getVault();
-    const banner = hasVault
-      ? `<div class="alert success">✅ Vault present on this device. <button class="btn" id="bannerUnlock">Unlock now</button></div>`
-      : `<div class="alert warn">⚠️ No vault saved yet. Create or Import a wallet, then click <b>Save vault</b> to keep access after closing the browser.</div>`;
+/* =============== Unlock Flow =============== */
+function showLock(){ $('#lockModal').classList.add('active'); $('#unlockPassword').value=''; $('#unlockMsg').textContent=''; }
+function hideLock(){ $('#lockModal').classList.remove('active'); }
+
+$('#btnLock').onclick=()=>{lock();alert('Locked');};
+$('#btnUnlock').onclick=()=>showLock();
+$('#cancelUnlock').onclick=()=>hideLock();
+
+$('#doUnlock').onclick=async()=>{
+  try{
+    const v=getVault(); if(!v){$('#unlockMsg').textContent='No vault found.';return;}
+    const pw=$('#unlockPassword').value;
+    const phrase=await aesDecrypt(pw,v.enc);
+    state.decryptedPhrase=phrase; state.unlocked=true;
+    $('#lockState').textContent='Unlocked'; hideLock(); scheduleAutoLock();
+
+    // build accounts
+    const n=getAccountCount();
+    state.accounts=Array.from({length:n},(_,i)=>{
+      const w=deriveAccountFromPhrase(phrase,i);
+      return {index:i,wallet:w,address:w.address};
+    });
+    state.activeIndex=0;
+    setActiveSigner();
+    state.provider=await getProvider('sep');
+    selectItem('control');
+  }catch(e){console.error(e);$('#unlockMsg').textContent='Wrong password or vault corrupted.';}
+};
+
+/* =============== Views =============== */
+const VIEWS={
+  control(){ // Control Center
+    const hasVault=!!getVault();
+    const accRows=state.accounts.map(a=>`
+      <tr><td>${a.index+1}</td><td class="mono">${a.address}</td></tr>`).join('')||'<tr><td colspan=2>No wallets yet.</td></tr>';
     return `
-      <div class="label">Welcome</div>
-      ${banner}
-      <div class="alert">Create or import a wallet, then unlock to use Messaging, Send, and Watchlist. This wallet is non-custodial; your secret is encrypted locally.</div>
+      <div class="label">Control Center</div>
+      <div class="small">Manage wallets under your single seed phrase.</div>
       <hr class="sep"/>
-      <div class="grid-2">
-        <div>
-          <div class="label">Create wallet</div>
-          <button class="btn" id="gen">Generate 12-word phrase</button>
-          <div style="height:8px"></div>
-          <textarea id="mnemonic" rows="3" readonly></textarea>
-          <div style="height:8px"></div>
-          <input id="password" type="password" placeholder="Password to encrypt (like MetaMask)"/>
-          <div style="height:8px"></div>
-          <button class="btn primary" id="save">Save vault</button>
-        </div>
-        <div>
-          <div class="label">Import wallet</div>
-          <textarea id="mnemonicIn" rows="3" placeholder="Enter your 12 or 24 words"></textarea>
-          <div style="height:8px"></div>
-          <input id="passwordIn" type="password" placeholder="Password to encrypt"/>
-          <div style="height:8px"></div>
-          <button class="btn" id="doImport">Import</button>
-        </div>
-      </div>
-    `;
+      ${hasVault?
+        `<button class="btn" id="addAcct">Add Wallet</button>`:
+        `<div class="alert warn">Create or import a vault first.</div>`}
+      <table class="table small"><thead><tr><th>#</th><th>Address</th></tr></thead><tbody>${accRows}</tbody></table>`;
   },
-  wallets(){ 
-    const addr = state.wallet?.address || '—';
+  wallets(){
+    const rows=state.accounts.map(a=>`<tr><td>${a.index+1}</td><td class="mono">${a.address}</td><td id="bal-${a.index}">—</td></tr>`).join('');
     return `
-      <div class="label">Active wallet</div>
-      <div class="kv"><div><b>Address</b></div><div class="mono">${addr}</div></div>
-      <hr class="sep"/>
-      <div class="label">Actions</div>
-      <div class="flex"><button class="btn" id="copyAddr">Copy address</button><button class="btn" id="showPK">Show public key</button></div>
-      <div id="out" class="small"></div>
-    `;
+      <div class="label">Wallet Balances</div>
+      <table class="table small"><thead><tr><th>#</th><th>Address</th><th>ETH</th></tr></thead><tbody>${rows}</tbody></table>
+      <div id="totalBal" class="small"></div>`;
   },
-  send(){ 
+  send(){
+    const acctOpts=state.accounts.map(a=>`<option value="${a.index}">Wallet #${a.index+1} — ${a.address.slice(0,6)}…${a.address.slice(-4)}</option>`).join('');
     return `
       <div class="label">Send ETH (Sepolia)</div>
-      <div class="small">Before each send, SafeSend will evaluate the recipient address and block if high risk.</div>
-      <hr class="sep"/>
-      <div class="send-form"><input id="sendTo" placeholder="0x recipient address"/><input id="sendAmt" placeholder="Amount (ETH)"/><button class="btn primary" id="doSend">Send</button></div>
-      <div id="sendOut" class="small" style="margin-top:8px"></div>
-      <div style="height:12px"></div>
-      <div class="label">Recent transactions (testnet)</div>
-      <div id="txList" class="small">—</div>
-    `;
-  },
-  messaging(){ 
-    return `
-      <div class="label">XMTP Messaging</div>
-      <div id="msgStatus" class="small">Status: ${state.xmtp ? 'Connected' : 'Disconnected'}</div>
-      <hr class="sep"/>
-      <div class="grid-2">
-        <div>
-          <div class="label">Start new chat</div>
-          <input id="peer" placeholder="Recipient EVM address (0x...)"/>
-          <div style="height:8px"></div>
-          <div class="flex"><input id="msg" placeholder="Type a message" style="flex:1"/><button class="btn primary" id="send">Send</button></div>
-          <div id="sendOut" class="small"></div>
-        </div>
-        <div>
-          <div class="label">Inbox (live)</div>
-          <div id="inbox" class="small">—</div>
-        </div>
+      <div class="send-form">
+        <label>From:</label><select id="fromAccount">${acctOpts}</select>
+        <input id="sendTo" placeholder="Recipient 0x address"/>
+        <input id="sendAmt" placeholder="Amount (ETH)"/>
+        <button class="btn primary" id="doSend">Send</button>
       </div>
-    `;
-  },
-  markets(){ 
-    // Table skeleton is in index.html hero block; this "Markets" view can reuse the same watchlist too.
-    const rows = state.watchlist.map(id=>`
-      <tr data-id="${id}">
-        <td class="mono">${id}</td>
-        <td class="mono price">—</td>
-        <td class="mono change">—</td>
-      </tr>
-    `).join('');
-    return `
-      <div class="label">Watchlist</div>
-      <div class="small">Prices via Cloudflare Worker → CoinGecko. Auto-refresh every 60s.</div>
+      <div id="sendOut" class="small"></div>
       <hr class="sep"/>
-      <table class="table small" id="watchlist">
-        <thead><tr><th>Asset</th><th>Price (USD)</th><th>24h</th></tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
-    `;
+      <div class="label">Last 10 Transactions</div>
+      <div id="txList" class="small">—</div>`;
   },
-  settings(){ 
-    const hasVault = !!getVault();
+  settings(){
     return `
       <div class="label">Settings</div>
-      <div class="kv"><div>Vault present</div><div>${hasVault ? '✅' : '❌'}</div></div>
-      <div class="kv"><div>Auto-lock</div><div>10 minutes</div></div>
-      <hr class="sep"/>
-      <button class="btn" id="wipe">Delete vault (local)</button>
-      <hr class="sep"/>
-      <div class="label">Backup</div>
-      <div class="flex" style="gap:8px;">
-        <button class="btn" id="exportVault">Export vault (JSON)</button>
-        <label class="btn">
-          Import vault JSON
-          <input type="file" id="importVaultFile" accept="application/json" style="display:none"/>
-        </label>
-      </div>
-      <div class="small">Export this encrypted vault and import it on another device/origin to keep access.</div>
-    `;
+      <button class="btn" id="wipe">Delete vault (local)</button>`;
   }
 };
 
-/* ================================
-   Render + handlers
-================================ */
+/* =============== Render / Nav =============== */
+function selectItem(view){$$('.sidebar .item').forEach(x=>x.classList.toggle('active',x.dataset.view===view));render(view);}
+$$('.sidebar .item').forEach(el=>el.onclick=()=>selectItem(el.dataset.view));
+selectItem('control');
+
 function render(view){
-  if (view !== 'messaging' && window._xmtpStreamCancel) { window._xmtpStreamCancel(); window._xmtpStreamCancel = null; }
+  const root=$('#view');
+  root.innerHTML=VIEWS[view]?VIEWS[view]():'<div>Not found</div>';
 
-  const root = $('#view');
-  root.innerHTML = VIEWS[view]();
-
-  if (view==='dashboard'){
-    $('#gen').onclick = ()=>{ $('#mnemonic').value = ethers.Mnemonic.fromEntropy(ethers.randomBytes(16)).phrase; };
-    $('#save').onclick = async ()=>{ const m = $('#mnemonic').value.trim(); const pw = $('#password').value; if (!m||!pw) return alert('Mnemonic+password required'); const enc = await aesEncrypt(pw,m); setVault({version:1,enc}); alert('Vault saved. Click Unlock.'); };
-    $('#doImport').onclick = async ()=>{ const m = $('#mnemonicIn').value.trim(); const pw = $('#passwordIn').value; if (!m||!pw) return alert('Mnemonic+password required'); const enc = await aesEncrypt(pw,m); setVault({version:1,enc}); alert('Imported & saved. Click Unlock.'); };
-    $('#bannerUnlock')?.addEventListener('click', showLock);
+  if(view==='control'){
+    $('#addAcct')?.addEventListener('click',()=>{
+      const n=getAccountCount()+1; setAccountCount(n);
+      const w=deriveAccountFromPhrase(state.decryptedPhrase,n-1);
+      state.accounts.push({index:n-1,wallet:w,address:w.address});
+      render('control');
+    });
   }
 
-  if (view==='wallets'){
-    $('#copyAddr').onclick = async ()=>{ if(!state.wallet) return; await navigator.clipboard.writeText(state.wallet.address); $('#out').textContent='Address copied.'; };
-    $('#showPK').onclick = async ()=>{ if(!state.wallet) return; const pk = await state.wallet.getPublicKey(); $('#out').textContent='Public key: ' + pk; };
-    if (state.wallet) $('#out').textContent = 'Current address: ' + state.wallet.address;
-  }
-
-  if (view==='send'){
-    $('#doSend').onclick = async ()=>{
-      const to = $('#sendTo').value.trim(); const amt = $('#sendAmt').value.trim();
-      if (!ethers.isAddress(to)) return alert('Invalid address');
-      const n = Number(amt); if (isNaN(n) || n<=0) return alert('Invalid amount');
-      $('#sendOut').textContent='Checking SafeSend...';
-      try{
-        const check = await fetchSafeSend(to);
-        if (check.score && check.score > 70) return $('#sendOut').textContent = 'Blocked by SafeSend: high risk ('+check.score+')';
-        $('#sendOut').textContent='SafeSend OK — preparing tx...';
-        const res = await sendEth({ to, amountEth: n, chain:'sep' });
-        $('#sendOut').innerHTML = 'Broadcasted: <a target=_blank href="https://sepolia.etherscan.io/tx/'+res.hash+'">'+res.hash+'</a>';
-        await loadRecentTxs();
-      }catch(e){ $('#sendOut').textContent = 'Error: ' + (e.message||e); }
-    };
-    loadRecentTxs();
-  }
-
-  if (view==='messaging'){
-    $('#msgStatus').textContent = 'Status: ' + (state.xmtp ? 'Connected' : 'Disconnected (unlock first)');
-    $('#send').onclick = async ()=>{
-      if (!state.xmtp) { $('#sendOut').textContent='Connect wallet (Unlock) first.'; return; }
-      const peer = $('#peer').value.trim(); const txt = $('#msg').value.trim();
-      if (!ethers.isAddress(peer)) { $('#sendOut').textContent='Enter valid 0x address'; return; }
-      try {
-        const convo = await state.xmtp.conversations.newConversation(peer);
-        await convo.send(txt || '(no text)');
-        $('#sendOut').textContent='Sent ✅';
-        $('#msg').value='';
-        await loadInbox();
-      } catch(e){ $('#sendOut').textContent='Error: ' + (e.message||e); }
-    };
-
-    (async ()=>{
-      if (!state.xmtp && state.wallet) { try { await ensureXMTP(); } catch {} }
-      if (!state.xmtp) { $('#inbox').textContent = 'Unlock first.'; return; }
-      $('#inbox').textContent = 'Loading…';
-      await loadInbox();
-
-      if (window._xmtpStreamCancel) { window._xmtpStreamCancel(); window._xmtpStreamCancel = null; }
-      const stream = await state.xmtp.conversations.streamAllMessages();
-      let cancelled = false;
-      window._xmtpStreamCancel = () => { cancelled = true; try { stream.return?.(); } catch {} };
-      (async () => { for await (const _msg of stream) { if (cancelled) break; await loadInbox(); } })();
+  if(view==='wallets'){
+    (async()=>{
+      const provider=await getProvider('sep');
+      let total=0;
+      for(const a of state.accounts){
+        try{
+          const wei=await provider.getBalance(a.address);
+          const eth=Number(ethers.formatEther(wei));
+          total+=eth;
+          $(`#bal-${a.index}`).textContent=eth.toFixed(4);
+        }catch(e){$(`#bal-${a.index}`).textContent='—';}
+      }
+      $('#totalBal').textContent=`Total: ${total.toFixed(4)} ETH`;
     })();
   }
 
-  if (view === 'markets') {
-    startWatchlist();
-  }
-
-  if (view==='settings'){
-    $('#wipe').onclick = ()=>{ if(confirm('Delete the local encrypted vault?')){ localStorage.removeItem(STORAGE_KEY); lock(); alert('Deleted.'); } };
-    $('#exportVault').onclick = ()=>{
-      const v = getVault(); if (!v) return alert('No vault to export.');
-      const blob = new Blob([JSON.stringify(v,null,2)], {type:'application/json'});
-      const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'xwallet_vault.json'; a.click();
-    };
-    $('#importVaultFile').onchange = async (e)=>{
-      const f = e.target.files?.[0]; if (!f) return;
+  if(view==='send'){
+    $('#fromAccount').onchange=()=>{state.activeIndex=Number($('#fromAccount').value);setActiveSigner();loadRecentTxsForActive();};
+    $('#doSend').onclick=async()=>{
+      const to=$('#sendTo').value.trim(), amt=$('#sendAmt').value.trim();
+      if(!ethers.isAddress(to)) return alert('Invalid recipient');
+      const n=Number(amt); if(isNaN(n)||n<=0) return alert('Invalid amount');
+      $('#sendOut').textContent='Checking SafeSend…';
+      const check=await fetchSafeSend(to);
+      $('#sendOut').innerHTML=`SafeSend Score: ${check.score}<br>${(check.findings||[]).join(' • ')}`;
+      if(check.score>70) return $('#sendOut').innerHTML+='<div class="alert warn">Blocked: high risk</div>';
+      $('#sendOut').textContent='Sending…';
       try{
-        const text = await f.text();
-        const json = JSON.parse(text);
-        if (!json?.enc?.ct) throw new Error('Invalid vault file.');
-        setVault(json);
-        alert('Vault imported. Click Unlock.');
-      }catch(err){ alert('Import failed: ' + (err.message||err)); }
+        const res=await sendEth({to,amountEth:n});
+        $('#sendOut').innerHTML=`Broadcasted: <a target=_blank href="https://sepolia.etherscan.io/tx/${res.hash}">${res.hash}</a>`;
+        loadRecentTxsForActive();
+      }catch(e){$('#sendOut').textContent='Error: '+(e.message||e);}
     };
+    loadRecentTxsForActive();
   }
-}
 
-/* ================================
-   Lock modal
-================================ */
-function showLock(){ $('#lockModal').classList.add('active'); $('#unlockPassword').value=''; $('#unlockMsg').textContent=''; }
-function hideLock(){ $('#lockModal').classList.remove('active'); }
-$('#btnLock').onclick = ()=>{ lock(); alert('Locked.'); };
-$('#btnUnlock').onclick = ()=> showLock();
-$('#cancelUnlock').onclick = ()=> hideLock();
-$('#doUnlock').onclick = async ()=>{
-  try{
-    const v = getVault(); if (!v) { $('#unlockMsg').textContent='No vault found.'; return; }
-    const pw = $('#unlockPassword').value; const phrase = await aesDecrypt(pw, v.enc);
-    const wallet = ethers.HDNodeWallet.fromPhrase(phrase);
-
-    state.decryptedPhrase = phrase;
-    state.wallet = wallet; 
-    state.unlocked = true; 
-    $('#lockState').textContent='Unlocked'; 
-    hideLock(); 
-    scheduleAutoLock();
-
-    state.provider = new ethers.JsonRpcProvider(RPCS.sep); 
-    state.signer = state.wallet.connect(state.provider);
-
-    try { await ensureXMTP(); } catch(e){ console.warn('XMTP init failed', e); }
-
-    selectItem('wallets');
-  }catch(e){ console.error(e); $('#unlockMsg').textContent = 'Wrong password (or corrupted vault).'; }
-};
-
-/* ================================
-   Nav
-================================ */
-function selectItem(view){ $$('.sidebar .item').forEach(x=>x.classList.toggle('active', x.dataset.view===view)); render(view); }
-$$('.sidebar .item').forEach(el=> el.onclick=()=> selectItem(el.dataset.view));
-selectItem('dashboard');
-
-// landing CTA
-$('#ctaApp')?.addEventListener('click', ()=> window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }));
-$('#ctaLearn')?.addEventListener('click', ()=> window.scrollTo({ top: window.innerHeight, behavior: 'smooth' }));
-
-// SafeSend backend call (resilient)
-async function fetchSafeSend(address, { timeoutMs = 5000 } = {}) {
-  const u = new URL(SAFE_SEND_URL);
-  u.searchParams.set('address', address);
-  // u.searchParams.set('chain','sepolia'); // if you support more, pass it
-
-  // simple timeout wrapper so we don't hang the UI
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), timeoutMs);
-
-  try {
-    const r = await fetch(u.toString(), { signal: ctrl.signal });
-    clearTimeout(t);
-    if (!r.ok) {
-      // Instead of throwing, return a neutral/medium score so sending can proceed
-      console.warn('SafeSend non-200:', r.status);
-      return { score: 50, findings: ['SafeSend unreachable (' + r.status + ')'] };
-    }
-    return await r.json();
-  } catch (e) {
-    clearTimeout(t);
-    console.warn('SafeSend fetch failed', e);
-    // Fallback so user can still send
-    return { score: 50, findings: ['SafeSend unreachable — using default'] };
+  if(view==='settings'){
+    $('#wipe').onclick=()=>{if(confirm('Delete vault?')){localStorage.clear();lock();alert('Deleted.');}};
   }
-}
-
-
-/* ================================
-   Provider + send + history
-================================ */
-async function getProvider(chain='sep'){ if (!RPCS[chain]) throw new Error('RPC not configured for ' + chain); return new ethers.JsonRpcProvider(RPCS[chain]); }
-async function connectWalletToProvider(chain='sep'){ if (!state.wallet) throw new Error('Unlock first'); const provider = await getProvider(chain); state.provider = provider; state.signer = state.wallet.connect(provider); return state.signer; }
-async function sendEth({ to, amountEth, chain='sep' }){
-  if (!state.signer) await connectWalletToProvider(chain);
-  const tx = { to, value: ethers.parseEther(String(amountEth)) };
-  try{
-    const fee = await state.signer.getFeeData();
-    if (fee?.maxFeePerGas) { tx.maxFeePerGas = fee.maxFeePerGas; tx.maxPriorityFeePerGas = fee.maxPriorityFeePerGas; }
-    const est = await state.signer.estimateGas(tx);
-    tx.gasLimit = est;
-  }catch(e){ console.warn('Gas estimation failed', e); }
-  const sent = await state.signer.sendTransaction(tx);
-  await sent.wait(1);
-  return { hash: sent.hash, receipt: sent };
-}
-async function loadRecentTxs(){
-  try{
-    if (!state.wallet || !state.provider) return;
-    const addr = state.wallet.address;
-    if (typeof state.provider.getHistory==='function'){
-      const history = await state.provider.getHistory(addr);
-      const recent = (history||[]).slice(-6).reverse();
-      const el = document.getElementById('txList');
-      if (el) el.innerHTML = recent.map(t=>`<div><a target=_blank href="https://sepolia.etherscan.io/tx/${t.hash}">${t.hash.slice(0,10)}…</a> • ${new Date(t.timestamp*1000).toLocaleString()}</div>`).join('') || 'No txs';
-    } else {
-      const el = document.getElementById('txList'); if (el) el.textContent='Recent txs unavailable for this provider.';
-    }
-  }catch(e){ console.warn(e); }
 }

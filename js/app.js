@@ -54,7 +54,8 @@ const state = {
   provider:null,
   decryptedPhrase:null,
   accounts:[],
-  signerIndex:0
+  signerIndex:0,
+  xmtp: null
 };
 
 function getVault(){ const s = localStorage.getItem(STORAGE_KEY_VAULT); return s ? JSON.parse(s) : null; }
@@ -68,6 +69,8 @@ function lock(){
   state.decryptedPhrase=null;
   state.accounts=[];
   state.signerIndex=0;
+  if (window._xmtpStreamCancel) { try{ window._xmtpStreamCancel(); }catch{} window._xmtpStreamCancel=null; }
+  state.xmtp=null;
   $("#lockState")?.textContent="Locked";
 }
 function scheduleAutoLock(){
@@ -89,6 +92,71 @@ function loadAccountsFromPhrase(phrase){
     const w=deriveAccountFromPhrase(phrase,i);
     state.accounts.push({index:i,wallet:w,address:w.address});
   }
+}
+
+/* ================================
+   XMTP helpers (V3-friendly)
+================================ */
+async function ensureXMTP() {
+  try{
+    const XMTP = window.XMTP; // expect index.html to provide (V3 ideally)
+    if (!XMTP?.Client) throw new Error("XMTP Client not available");
+    if (state.xmtp) return state.xmtp;
+
+    const signerWallet = state.accounts?.[state.signerIndex]?.wallet;
+    if (!signerWallet) throw new Error("Unlock and have at least one wallet");
+
+    // xmtp-js v12 supports ethers v6 Signer with signMessage
+    const client = await XMTP.Client.create(
+      {
+        getAddress: async () => signerWallet.address,
+        signMessage: async (msg) => await signerWallet.signMessage(msg)
+      },
+      { env: 'production' }
+    );
+    state.xmtp = client;
+    return client;
+  }catch(e){
+    console.warn("XMTP init failed", e);
+    state.xmtp = null;
+    return null;
+  }
+}
+
+// Inbox helper
+async function loadInbox() {
+  const box = document.getElementById('inbox');
+  if (!box) return;
+
+  if (!state.xmtp) {
+    box.textContent = 'XMTP not available or needs V3.';
+    return;
+  }
+
+  const convos = await state.xmtp.conversations.list();
+  const latest = [];
+  for (const c of convos.slice(0, 20)) {
+    const msgs = await c.messages({ pageSize: 1, direction: 'descending' });
+    if (msgs.length) {
+      latest.push({
+        peer: c.peerAddress,
+        text: msgs[0].content,
+        at:   msgs[0].sent
+      });
+    }
+  }
+  latest.sort((a, b) => b.at - a.at);
+
+  box.innerHTML = latest.length
+    ? latest.map(m => `
+        <div class="kv">
+          <div>${m.peer}</div>
+          <div>${new Date(m.at).toLocaleString()}</div>
+        </div>
+        <div class="small">${String(m.text)}</div>
+        <hr class="sep"/>
+      `).join('')
+    : 'No messages yet.';
 }
 
 /* ================================
@@ -131,6 +199,7 @@ const VIEWS={
 
     return `<div class="label">Control Center</div><hr class="sep"/>${createImport}${manage}`;
   },
+
   wallets(){
     const rows=state.accounts.map(a=>`
       <tr><td>${a.index+1}</td><td class="mono">${a.address}</td><td id="bal-${a.index}">—</td></tr>`).join("");
@@ -138,6 +207,7 @@ const VIEWS={
       <table class="table small"><thead><tr><th>#</th><th>Address</th><th>ETH</th></tr></thead><tbody>${rows}</tbody></table>
       <div id="totalBal" class="small"></div>`;
   },
+
   send(){
     const acctOpts=state.accounts.map(a=>`<option value="${a.index}" ${a.index===state.signerIndex?"selected":""}>
       Wallet #${a.index+1} — ${a.address.slice(0,6)}…${a.address.slice(-4)}</option>`).join("")||"<option disabled>No wallets</option>";
@@ -151,6 +221,28 @@ const VIEWS={
       <div id="sendOut" class="small"></div>
       <hr class="sep"/><div class="label">Last 10 Transactions</div><div id="txList" class="small">—</div>`;
   },
+
+  messaging(){
+    return `
+      <div class="label">XMTP Messaging</div>
+      <div id="msgStatus" class="small">Status: ${state.xmtp ? 'Connected' : 'Disconnected'}</div>
+      <hr class="sep"/>
+      <div class="grid-2">
+        <div>
+          <div class="label">Start new chat</div>
+          <input id="peer" placeholder="Recipient EVM address (0x...)"/>
+          <div style="height:8px"></div>
+          <div class="flex"><input id="msg" placeholder="Type a message" style="flex:1"/><button class="btn primary" id="sendMsg">Send</button></div>
+          <div id="sendMsgOut" class="small"></div>
+        </div>
+        <div>
+          <div class="label">Inbox (live)</div>
+          <div id="inbox" class="small">—</div>
+        </div>
+      </div>
+    `;
+  },
+
   settings(){
     return `<div class="label">Settings</div><button class="btn" id="wipe">Delete vault (local)</button>`;
   }
@@ -210,6 +302,53 @@ function render(view){
     });
     $("#doSend")?.addEventListener("click",sendEthFlow);
     loadRecentTxs();
+  }
+
+  // ---- messaging ----
+  if(view==="messaging"){
+    (async ()=>{
+      // initialize if possible
+      if (!state.xmtp && state.unlocked) {
+        await ensureXMTP();
+      }
+      $("#msgStatus").textContent = 'Status: ' + (state.xmtp ? 'Connected' : 'Disconnected (unlock or update XMTP)');
+
+      // send button
+      $("#sendMsg")?.addEventListener("click", async ()=>{
+        const out = $("#sendMsgOut");
+        if (!state.xmtp) { out.textContent='XMTP not available (update to V3)'; return; }
+        const peer = $("#peer").value.trim();
+        const txt  = $("#msg").value.trim();
+        if (!ethers.isAddress(peer)) { out.textContent='Enter valid 0x address'; return; }
+        try{
+          const convo = await state.xmtp.conversations.newConversation(peer);
+          await convo.send(txt || '(no text)');
+          out.textContent='Sent ✅';
+          $("#msg").value='';
+          await loadInbox();
+        }catch(e){ out.textContent='Error: ' + (e.message||e); }
+      });
+
+      // live inbox (if client exists)
+      if (state.xmtp) {
+        $("#inbox").textContent = 'Loading…';
+        await loadInbox();
+
+        if (window._xmtpStreamCancel) { try{ window._xmtpStreamCancel(); }catch{} window._xmtpStreamCancel=null; }
+        const stream = await state.xmtp.conversations.streamAllMessages();
+        let cancelled = false;
+        window._xmtpStreamCancel = () => { cancelled = true; try{ stream.return?.(); }catch{} };
+
+        (async () => {
+          for await (const _msg of stream) {
+            if (cancelled) break;
+            await loadInbox();
+          }
+        })();
+      } else {
+        $("#inbox").textContent = 'XMTP not available or needs V3.';
+      }
+    })();
   }
 
   // ---- settings ----

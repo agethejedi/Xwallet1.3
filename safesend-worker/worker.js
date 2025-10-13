@@ -147,3 +147,44 @@ async function handleCheck(url, env, origin) {
   score = Math.max(0, Math.min(100, score));
   return json({ score, findings }, 200, origin);
 }
+// ---- /account/txs ----
+if (url.pathname === "/account/txs") {
+  return handleAccountTxs(url, env, origin);
+}
+
+async function handleAccountTxs(url, env, origin) {
+  const address = url.searchParams.get("address") || "";
+  const chain = (url.searchParams.get("chain") || "sepolia").toLowerCase();
+  if (!address.startsWith("0x"))
+    return json({ error: "address required" }, 400, origin);
+
+  const HOSTS = {
+    sepolia: "api-sepolia.etherscan.io",
+    mainnet: "api.etherscan.io",
+    polygon: "api.polygonscan.com",
+  };
+  const host = HOSTS[chain] || HOSTS.sepolia;
+
+  const api = `https://${host}/api?module=account&action=txlist&address=${encodeURIComponent(
+    address
+  )}&startblock=0&endblock=99999999&sort=desc&apikey=${env.ETHERSCAN_API_KEY}`;
+
+  try {
+    const r = await fetch(api, { cf: { cacheTtl: 60, cacheEverything: true } });
+    const j = await r.json();
+    if (j.status !== "1" || !Array.isArray(j.result)) {
+      return json({ error: "etherscan_failed", j }, 502, origin);
+    }
+    const top10 = j.result.slice(0, 10);
+    return new Response(JSON.stringify({ txs: top10 }), {
+      status: 200,
+      headers: {
+        "content-type": "application/json",
+        ...corsHeaders(origin),
+        "Cache-Control": "public, max-age=60",
+      },
+    });
+  } catch (e) {
+    return json({ error: "tx_fetch_failed", message: e.message }, 500, origin);
+  }
+}

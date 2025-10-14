@@ -9,7 +9,7 @@ document.addEventListener("DOMContentLoaded", () => {
 ================================ */
 const RPCS = {
   // ⬇️ REPLACE with your real Sepolia RPC (Alchemy/Infura)
-  sep: "https://eth-sepolia.g.alchemy.com/v2/REPLACE_WITH_YOUR_KEY",
+  sep: "https://eth-sepolia.g.alchemy.com/v2/kxHg5y9yBXWAb9cOcJsf0",
 };
 
 // SafeSend Worker (/check endpoint)

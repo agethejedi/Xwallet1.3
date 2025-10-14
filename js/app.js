@@ -1,18 +1,18 @@
 // =========================================
-// X-Wallet v1.3 — Control Center Edition (fixed optional chaining errors)
+// X-Wallet v1.3 — Control Center Edition
 // =========================================
 import { ethers } from "https://esm.sh/ethers@6.13.2";
 
 document.addEventListener("DOMContentLoaded", () => {
-
 /* ================================
    CONFIG
 ================================ */
 const RPCS = {
-  sep: "https://eth-sepolia.g.alchemy.com/v2/kxHg5y9yBXWAb9cOcJsf0",
+  // ⬇️ REPLACE with your real Sepolia RPC (Alchemy/Infura)
+  sep: "https://eth-sepolia.g.alchemy.com/v2/REPLACE_WITH_YOUR_KEY",
 };
 
-// SafeSend Worker
+// SafeSend Worker (/check endpoint)
 const SAFE_SEND_URL = "https://xwalletv1dot2.agedotcom.workers.dev/check";
 
 /* ================================
@@ -33,7 +33,6 @@ async function aesEncrypt(password, plaintext){
   const ct   = new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM', iv}, key, enc.encode(plaintext)));
   return { ct: Array.from(ct), iv: Array.from(iv), salt: Array.from(salt) };
 }
-
 async function aesDecrypt(password, payload){
   const dec = new TextDecoder();
   const { ct, iv, salt } = payload;
@@ -53,8 +52,8 @@ const state = {
   unlocked:false,
   provider:null,
   decryptedPhrase:null,
-  accounts:[],
-  signerIndex:0
+  accounts:[],        // [{index, wallet, address}]
+  signerIndex:0       // which account to send from
 };
 
 function getVault(){ const s = localStorage.getItem(STORAGE_KEY_VAULT); return s ? JSON.parse(s) : null; }
@@ -68,8 +67,7 @@ function lock(){
   state.decryptedPhrase=null;
   state.accounts=[];
   state.signerIndex=0;
-  const el = $("#lockState");
-  if (el) el.textContent = "Locked";
+  const badge = $("#lockState"); if (badge) badge.textContent = "Locked";
 }
 function scheduleAutoLock(){
   clearTimeout(window._inactivityTimer);
@@ -99,23 +97,28 @@ const VIEWS={
   dashboard(){
     const hasVault=!!getVault();
     const unlocked=state.unlocked;
-    const accRows=unlocked&&state.accounts.length?
-      state.accounts.map(a=>`<tr><td>${a.index+1}</td><td class="mono">${a.address}</td></tr>`).join(""):
-      "<tr><td colspan='2'>No wallets yet.</td></tr>";
+    const accRows=unlocked&&state.accounts.length
+      ? state.accounts.map(a=>`<tr><td>${a.index+1}</td><td class="mono">${a.address}</td></tr>`).join("")
+      : "<tr><td colspan='2'>No wallets yet.</td></tr>";
 
     const createImport=!hasVault?`
       <div class="grid-2">
         <div>
           <div class="label">Create wallet</div>
           <button class="btn" id="gen">Generate 12-word phrase</button>
+          <div style="height:8px"></div>
           <textarea id="mnemonic" rows="3" readonly></textarea>
+          <div style="height:8px"></div>
           <input id="password" type="password" placeholder="Password"/>
+          <div style="height:8px"></div>
           <button class="btn primary" id="save">Save vault</button>
         </div>
         <div>
           <div class="label">Import wallet</div>
           <textarea id="mnemonicIn" rows="3" placeholder="Enter words"></textarea>
+          <div style="height:8px"></div>
           <input id="passwordIn" type="password" placeholder="Password"/>
+          <div style="height:8px"></div>
           <button class="btn" id="doImport">Import</button>
         </div>
       </div>
@@ -124,6 +127,7 @@ const VIEWS={
     const manage=hasVault?`
       <div class="label">Wallets under your seed</div>
       <button class="btn" id="addAcct"${unlocked?"":" disabled"}>Add Wallet</button>
+      <div style="height:8px"></div>
       <table class="table small">
         <thead><tr><th>#</th><th>Address</th></tr></thead>
         <tbody>${accRows}</tbody>
@@ -134,26 +138,39 @@ const VIEWS={
   },
   wallets(){
     const rows=state.accounts.map(a=>`
-      <tr><td>${a.index+1}</td><td class="mono">${a.address}</td><td id="bal-${a.index}">—</td></tr>`).join("");
-    return `<div class="label">Wallet Balances</div>
-      <table class="table small"><thead><tr><th>#</th><th>Address</th><th>ETH</th></tr></thead><tbody>${rows}</tbody></table>
+      <tr>
+        <td>${a.index+1}</td>
+        <td class="mono">${a.address}</td>
+        <td id="bal-${a.index}">—</td>
+      </tr>`).join("");
+    return `
+      <div class="label">Wallet Balances</div>
+      <table class="table small">
+        <thead><tr><th>#</th><th>Address</th><th>ETH</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
       <div id="totalBal" class="small"></div>`;
   },
   send(){
     const acctOpts=state.accounts.map(a=>`<option value="${a.index}" ${a.index===state.signerIndex?"selected":""}>
       Wallet #${a.index+1} — ${a.address.slice(0,6)}…${a.address.slice(-4)}</option>`).join("")||"<option disabled>No wallets</option>";
-    return `<div class="label">Send ETH (Sepolia)</div>
+    return `
+      <div class="label">Send ETH (Sepolia)</div>
       <div class="send-form">
         <select id="fromAccount">${acctOpts}</select>
         <input id="sendTo" placeholder="Recipient 0x address"/>
         <input id="sendAmt" placeholder="Amount (ETH)"/>
         <button class="btn primary" id="doSend">Send</button>
       </div>
-      <div id="sendOut" class="small"></div>
-      <hr class="sep"/><div class="label">Last 10 Transactions</div><div id="txList" class="small">—</div>`;
+      <div id="sendOut" class="small" style="margin-top:8px"></div>
+      <hr class="sep"/>
+      <div class="label">Last 10 Transactions</div>
+      <div id="txList" class="small">—</div>`;
   },
   settings(){
-    return `<div class="label">Settings</div><button class="btn" id="wipe">Delete vault (local)</button>`;
+    return `
+      <div class="label">Settings</div>
+      <button class="btn" id="wipe">Delete vault (local)</button>`;
   }
 };
 
@@ -168,10 +185,11 @@ function render(view){
   // ---- dashboard handlers ----
   if(view==="dashboard"){
     $("#gen")?.addEventListener("click",()=>{
-      const mnEl=$("#mnemonic"); if(mnEl) mnEl.value=ethers.Mnemonic.fromEntropy(ethers.randomBytes(16)).phrase;
+      const ta = $("#mnemonic");
+      if (ta) ta.value = ethers.Mnemonic.fromEntropy(ethers.randomBytes(16)).phrase;
     });
     $("#save")?.addEventListener("click",async()=>{
-      const m=$("#mnemonic")?.value.trim();
+      const m=$("#mnemonic")?.value?.trim();
       const pw=$("#password")?.value;
       if(!m||!pw) return alert("Mnemonic + password required");
       const enc=await aesEncrypt(pw,m);
@@ -181,7 +199,7 @@ function render(view){
       render("dashboard");
     });
     $("#doImport")?.addEventListener("click",async()=>{
-      const m=$("#mnemonicIn")?.value.trim();
+      const m=$("#mnemonicIn")?.value?.trim();
       const pw=$("#passwordIn")?.value;
       if(!m||!pw) return alert("Mnemonic + password required");
       const enc=await aesEncrypt(pw,m);
@@ -201,7 +219,7 @@ function render(view){
   }
 
   // ---- wallets ----
-  if(view==="wallets"){loadWalletBalances();}
+  if(view==="wallets"){ loadWalletBalances(); }
 
   // ---- send ----
   if(view==="send"){
@@ -230,15 +248,14 @@ function selectItem(view){$$(".sidebar .item").forEach(x=>x.classList.toggle("ac
 $$(".sidebar .item").forEach(el=>el.onclick=()=>selectItem(el.dataset.view));
 selectItem("dashboard");
 
-function showLock(){ const lm=$("#lockModal"); if(lm){ lm.classList.add("active"); } const up=$("#unlockPassword"); if(up){ up.value=""; } const um=$("#unlockMsg"); if(um){ um.textContent=""; } }
-function hideLock(){ const lm=$("#lockModal"); if(lm){ lm.classList.remove("active"); } }
-
-$("#btnLock")?.addEventListener("click",()=>{lock();alert("Locked");});
+function showLock(){ $("#lockModal")?.classList.add("active"); const p=$("#unlockPassword"); if(p) p.value=""; const m=$("#unlockMsg"); if(m) m.textContent=""; }
+function hideLock(){ $("#lockModal")?.classList.remove("active"); }
+$("#btnLock")?.addEventListener("click",()=>{ lock(); alert("Locked"); });
 $("#btnUnlock")?.addEventListener("click",()=>showLock());
 $("#cancelUnlock")?.addEventListener("click",()=>hideLock());
 $("#doUnlock")?.addEventListener("click",async()=>{
   try{
-    const v=getVault(); if(!v){const um=$("#unlockMsg"); if(um) um.textContent="No vault found.";return;}
+    const v=getVault(); if(!v){const um=$("#unlockMsg"); if(um) um.textContent="No vault found."; return;}
     const pw=$("#unlockPassword")?.value;
     const phrase=await aesDecrypt(pw,v.enc);
     state.decryptedPhrase=phrase;
@@ -246,10 +263,10 @@ $("#doUnlock")?.addEventListener("click",async()=>{
     loadAccountsFromPhrase(phrase);
     state.provider=new ethers.JsonRpcProvider(RPCS.sep);
     state.unlocked=true;
-    const ls=$("#lockState"); if(ls) ls.textContent="Unlocked";
+    const badge = $("#lockState"); if (badge) badge.textContent = "Unlocked";
     hideLock();scheduleAutoLock();
     selectItem("dashboard");
-  }catch(e){console.error(e);const um=$("#unlockMsg"); if(um) um.textContent="Wrong password or corrupted vault.";}
+  }catch(e){console.error(e); const um=$("#unlockMsg"); if(um) um.textContent="Wrong password or corrupted vault.";}
 });
 
 /* ================================
@@ -262,12 +279,16 @@ async function loadWalletBalances(){
     try{
       const b=await state.provider.getBalance(a.address);
       total+=b;
-      const be = $(`#bal-${a.index}`);
+      const be=document.querySelector(`#bal-${a.index}`);
       if (be) be.textContent=ethers.formatEther(b);
-    }catch{}
+    }catch(e){
+      console.warn('balance fetch failed', a.address, e);
+      const be=document.querySelector(`#bal-${a.index}`);
+      if (be) be.textContent='error';
+    }
   }
-  const tb=$("#totalBal");
-  if(tb) tb.textContent="Total (ETH): "+ethers.formatEther(total);
+  const tb=document.querySelector("#totalBal");
+  if (tb) tb.textContent="Total (ETH): "+ethers.formatEther(total);
 }
 
 async function loadRecentTxs(){
@@ -287,7 +308,7 @@ async function loadRecentTxs(){
 }
 
 /* ================================
-   Send flow + SafeSend
+   SafeSend + Send flow (ethers v6)
 ================================ */
 async function fetchSafeSend(address){
   try{
@@ -301,28 +322,37 @@ async function fetchSafeSend(address){
 }
 
 async function sendEthFlow(){
-  const to=$("#sendTo")?.value.trim();
-  const amt=$("#sendAmt")?.value.trim();
+  const to=$("#sendTo")?.value?.trim();
+  const amt=$("#sendAmt")?.value?.trim();
   if(!ethers.isAddress(to)) return alert("Invalid recipient");
   const n=Number(amt); if(isNaN(n)||n<=0) return alert("Invalid amount");
   const acct=state.accounts[state.signerIndex];
   if(!acct||!state.provider) return alert("Unlock first");
-  const so=$("#sendOut");
-  if(so) so.textContent="Checking SafeSend…";
+
+  const out=$("#sendOut"); if(out) out.textContent="Checking SafeSend…";
   const check=await fetchSafeSend(to);
-  if(check.score>70){if(so) so.textContent=`Blocked (score ${check.score})`;return;}
-  if(so) so.textContent=`SafeSend OK (${check.score}). Sending…`;
+  if(check.score>70){ if(out) out.textContent=`Blocked (score ${check.score})`; return; }
+  if(out) out.textContent=`SafeSend OK (${check.score}). Sending…`;
+
   try{
     const signer=acct.wallet.connect(state.provider);
-    const tx={to,value:ethers.parseEther(String(n))};
-    const fee=await signer.getFeeData();
-    if(fee.maxFeePerGas){tx.maxFeePerGas=fee.maxFeePerGas;tx.maxPriorityFeePerGas=fee.maxPriorityFeePerGas;}
-    tx.gasLimit=await signer.estimateGas(tx);
+    const tx={ to, value: ethers.parseEther(String(n)) };
+
+    // Ethers v6: fee data from the PROVIDER (not signer)
+    const fee = await state.provider.getFeeData();
+    if (fee && fee.maxFeePerGas) {
+      tx.maxFeePerGas = fee.maxFeePerGas;
+      tx.maxPriorityFeePerGas = fee.maxPriorityFeePerGas;
+    }
+
+    // Optional: estimate gas
+    try { tx.gasLimit = await signer.estimateGas(tx); } catch {}
+
     const sent=await signer.sendTransaction(tx);
-    if(so) so.innerHTML=`Broadcasted: <a target=_blank href="https://sepolia.etherscan.io/tx/${sent.hash}">${sent.hash}</a>`;
+    if(out) out.innerHTML=`Broadcasted: <a target=_blank href="https://sepolia.etherscan.io/tx/${sent.hash}">${sent.hash}</a>`;
     await sent.wait(1);
     loadRecentTxs();
-  }catch(e){if(so) so.textContent="Error: "+(e.message||e);}
+  }catch(e){ if(out) out.textContent="Error: "+(e.message||e); }
 }
 
 }); // end DOMContentLoaded

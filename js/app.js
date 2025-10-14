@@ -1,18 +1,19 @@
 // =========================================
-// X-Wallet v1.3 — Control Center Edition
+// X-Wallet v1.3 — Control Center + Recent TXs
 // =========================================
 import { ethers } from "https://esm.sh/ethers@6.13.2";
 
 document.addEventListener("DOMContentLoaded", () => {
+
 /* ================================
    CONFIG
 ================================ */
 const RPCS = {
-  // ⬇️ REPLACE with your real Sepolia RPC (Alchemy/Infura)
-  sep: "https://eth-sepolia.g.alchemy.com/v2/kxHg5y9yBXWAb9cOcJsf0",
+  // Replace with your real Alchemy Sepolia RPC URL
+  sep: "https://eth-sepolia.g.alchemy.com/v2/REPLACE_WITH_YOUR_KEY",
 };
 
-// SafeSend Worker (/check endpoint)
+// Optional SafeSend (used in send flow text; OK to leave as-is)
 const SAFE_SEND_URL = "https://xwalletv1dot2.agedotcom.workers.dev/check";
 
 /* ================================
@@ -33,6 +34,7 @@ async function aesEncrypt(password, plaintext){
   const ct   = new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM', iv}, key, enc.encode(plaintext)));
   return { ct: Array.from(ct), iv: Array.from(iv), salt: Array.from(salt) };
 }
+
 async function aesDecrypt(password, payload){
   const dec = new TextDecoder();
   const { ct, iv, salt } = payload;
@@ -52,8 +54,8 @@ const state = {
   unlocked:false,
   provider:null,
   decryptedPhrase:null,
-  accounts:[],        // [{index, wallet, address}]
-  signerIndex:0       // which account to send from
+  accounts:[],     // [{ index, wallet, address }]
+  signerIndex:0,   // which derived wallet to send from
 };
 
 function getVault(){ const s = localStorage.getItem(STORAGE_KEY_VAULT); return s ? JSON.parse(s) : null; }
@@ -67,7 +69,7 @@ function lock(){
   state.decryptedPhrase=null;
   state.accounts=[];
   state.signerIndex=0;
-  const badge = $("#lockState"); if (badge) badge.textContent = "Locked";
+  const ls = document.getElementById("lockState"); if (ls) ls.textContent = "Locked";
 }
 function scheduleAutoLock(){
   clearTimeout(window._inactivityTimer);
@@ -97,28 +99,23 @@ const VIEWS={
   dashboard(){
     const hasVault=!!getVault();
     const unlocked=state.unlocked;
-    const accRows=unlocked&&state.accounts.length
-      ? state.accounts.map(a=>`<tr><td>${a.index+1}</td><td class="mono">${a.address}</td></tr>`).join("")
-      : "<tr><td colspan='2'>No wallets yet.</td></tr>";
+    const accRows=unlocked&&state.accounts.length?
+      state.accounts.map(a=>`<tr><td>${a.index+1}</td><td class="mono">${a.address}</td></tr>`).join(""):
+      "<tr><td colspan='2'>No wallets yet.</td></tr>";
 
     const createImport=!hasVault?`
       <div class="grid-2">
         <div>
           <div class="label">Create wallet</div>
           <button class="btn" id="gen">Generate 12-word phrase</button>
-          <div style="height:8px"></div>
           <textarea id="mnemonic" rows="3" readonly></textarea>
-          <div style="height:8px"></div>
           <input id="password" type="password" placeholder="Password"/>
-          <div style="height:8px"></div>
           <button class="btn primary" id="save">Save vault</button>
         </div>
         <div>
           <div class="label">Import wallet</div>
           <textarea id="mnemonicIn" rows="3" placeholder="Enter words"></textarea>
-          <div style="height:8px"></div>
           <input id="passwordIn" type="password" placeholder="Password"/>
-          <div style="height:8px"></div>
           <button class="btn" id="doImport">Import</button>
         </div>
       </div>
@@ -127,7 +124,6 @@ const VIEWS={
     const manage=hasVault?`
       <div class="label">Wallets under your seed</div>
       <button class="btn" id="addAcct"${unlocked?"":" disabled"}>Add Wallet</button>
-      <div style="height:8px"></div>
       <table class="table small">
         <thead><tr><th>#</th><th>Address</th></tr></thead>
         <tbody>${accRows}</tbody>
@@ -136,24 +132,19 @@ const VIEWS={
 
     return `<div class="label">Control Center</div><hr class="sep"/>${createImport}${manage}`;
   },
+
   wallets(){
     const rows=state.accounts.map(a=>`
-      <tr>
-        <td>${a.index+1}</td>
-        <td class="mono">${a.address}</td>
-        <td id="bal-${a.index}">—</td>
-      </tr>`).join("");
-    return `
-      <div class="label">Wallet Balances</div>
-      <table class="table small">
-        <thead><tr><th>#</th><th>Address</th><th>ETH</th></tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
+      <tr><td>${a.index+1}</td><td class="mono">${a.address}</td><td id="bal-${a.index}">—</td></tr>`).join("");
+    return `<div class="label">Wallet Balances</div>
+      <table class="table small"><thead><tr><th>#</th><th>Address</th><th>ETH</th></tr></thead><tbody>${rows}</tbody></table>
       <div id="totalBal" class="small"></div>`;
   },
+
   send(){
     const acctOpts=state.accounts.map(a=>`<option value="${a.index}" ${a.index===state.signerIndex?"selected":""}>
       Wallet #${a.index+1} — ${a.address.slice(0,6)}…${a.address.slice(-4)}</option>`).join("")||"<option disabled>No wallets</option>";
+
     return `
       <div class="label">Send ETH (Sepolia)</div>
       <div class="send-form">
@@ -162,15 +153,24 @@ const VIEWS={
         <input id="sendAmt" placeholder="Amount (ETH)"/>
         <button class="btn primary" id="doSend">Send</button>
       </div>
-      <div id="sendOut" class="small" style="margin-top:8px"></div>
+      <div id="sendOut" class="small"></div>
+
       <hr class="sep"/>
-      <div class="label">Last 10 Transactions</div>
-      <div id="txList" class="small">—</div>`;
+      <div class="grid-2">
+        <div>
+          <div class="label">Your last 10 transactions</div>
+          <div id="txList" class="small">—</div>
+        </div>
+        <div>
+          <div class="label">Recipient recent txs</div>
+          <div id="rxList" class="small">—</div>
+        </div>
+      </div>
+    `;
   },
+
   settings(){
-    return `
-      <div class="label">Settings</div>
-      <button class="btn" id="wipe">Delete vault (local)</button>`;
+    return `<div class="label">Settings</div><button class="btn" id="wipe">Delete vault (local)</button>`;
   }
 };
 
@@ -185,12 +185,11 @@ function render(view){
   // ---- dashboard handlers ----
   if(view==="dashboard"){
     $("#gen")?.addEventListener("click",()=>{
-      const ta = $("#mnemonic");
-      if (ta) ta.value = ethers.Mnemonic.fromEntropy(ethers.randomBytes(16)).phrase;
+      $("#mnemonic").value=ethers.Mnemonic.fromEntropy(ethers.randomBytes(16)).phrase;
     });
     $("#save")?.addEventListener("click",async()=>{
-      const m=$("#mnemonic")?.value?.trim();
-      const pw=$("#password")?.value;
+      const m=$("#mnemonic").value.trim();
+      const pw=$("#password").value;
       if(!m||!pw) return alert("Mnemonic + password required");
       const enc=await aesEncrypt(pw,m);
       setVault({version:1,enc});
@@ -199,8 +198,8 @@ function render(view){
       render("dashboard");
     });
     $("#doImport")?.addEventListener("click",async()=>{
-      const m=$("#mnemonicIn")?.value?.trim();
-      const pw=$("#passwordIn")?.value;
+      const m=$("#mnemonicIn").value.trim();
+      const pw=$("#passwordIn").value;
       if(!m||!pw) return alert("Mnemonic + password required");
       const enc=await aesEncrypt(pw,m);
       setVault({version:1,enc});
@@ -219,16 +218,28 @@ function render(view){
   }
 
   // ---- wallets ----
-  if(view==="wallets"){ loadWalletBalances(); }
+  if(view==="wallets"){loadWalletBalances();}
 
   // ---- send ----
   if(view==="send"){
     $("#fromAccount")?.addEventListener("change",(e)=>{
       state.signerIndex=Number(e.target.value);
-      loadRecentTxs();
+      loadRecentTxs();  // update "your" recent txs when switching wallet
     });
+
     $("#doSend")?.addEventListener("click",sendEthFlow);
-    loadRecentTxs();
+
+    // Live recipient txs as the user types a valid address
+    const toEl = $("#sendTo");
+    const updateRx = () => loadAddressTxs(toEl.value.trim(), 'rxList');
+    toEl?.addEventListener('input', () => {
+      if (ethers.isAddress(toEl.value.trim())) updateRx();
+    });
+    toEl?.addEventListener('blur', updateRx);
+
+    // initial loads
+    loadRecentTxs(); // your account
+    updateRx();      // recipient if prefilled
   }
 
   // ---- settings ----
@@ -248,25 +259,25 @@ function selectItem(view){$$(".sidebar .item").forEach(x=>x.classList.toggle("ac
 $$(".sidebar .item").forEach(el=>el.onclick=()=>selectItem(el.dataset.view));
 selectItem("dashboard");
 
-function showLock(){ $("#lockModal")?.classList.add("active"); const p=$("#unlockPassword"); if(p) p.value=""; const m=$("#unlockMsg"); if(m) m.textContent=""; }
-function hideLock(){ $("#lockModal")?.classList.remove("active"); }
+function showLock(){ $("#lockModal").classList.add("active"); $("#unlockPassword").value=""; $("#unlockMsg").textContent=""; }
+function hideLock(){ $("#lockModal").classList.remove("active"); }
 $("#btnLock")?.addEventListener("click",()=>{ lock(); alert("Locked"); });
 $("#btnUnlock")?.addEventListener("click",()=>showLock());
 $("#cancelUnlock")?.addEventListener("click",()=>hideLock());
 $("#doUnlock")?.addEventListener("click",async()=>{
   try{
-    const v=getVault(); if(!v){const um=$("#unlockMsg"); if(um) um.textContent="No vault found."; return;}
-    const pw=$("#unlockPassword")?.value;
+    const v=getVault(); if(!v){$("#unlockMsg").textContent="No vault found.";return;}
+    const pw=$("#unlockPassword").value;
     const phrase=await aesDecrypt(pw,v.enc);
     state.decryptedPhrase=phrase;
     if(!getAccountCount()) setAccountCount(1);
     loadAccountsFromPhrase(phrase);
     state.provider=new ethers.JsonRpcProvider(RPCS.sep);
     state.unlocked=true;
-    const badge = $("#lockState"); if (badge) badge.textContent = "Unlocked";
+    const ls = document.getElementById("lockState"); if (ls) ls.textContent = "Unlocked";
     hideLock();scheduleAutoLock();
     selectItem("dashboard");
-  }catch(e){console.error(e); const um=$("#unlockMsg"); if(um) um.textContent="Wrong password or corrupted vault.";}
+  }catch(e){console.error(e);$("#unlockMsg").textContent="Wrong password or corrupted vault.";}
 });
 
 /* ================================
@@ -279,16 +290,12 @@ async function loadWalletBalances(){
     try{
       const b=await state.provider.getBalance(a.address);
       total+=b;
-      const be=document.querySelector(`#bal-${a.index}`);
-      if (be) be.textContent=ethers.formatEther(b);
-    }catch(e){
-      console.warn('balance fetch failed', a.address, e);
-      const be=document.querySelector(`#bal-${a.index}`);
-      if (be) be.textContent='error';
-    }
+      const cell = document.getElementById(`bal-${a.index}`);
+      if (cell) cell.textContent = ethers.formatEther(b);
+    }catch{}
   }
-  const tb=document.querySelector("#totalBal");
-  if (tb) tb.textContent="Total (ETH): "+ethers.formatEther(total);
+  const tb = document.getElementById("totalBal");
+  if (tb) tb.textContent = "Total (ETH): " + ethers.formatEther(total);
 }
 
 async function loadRecentTxs(){
@@ -307,8 +314,31 @@ async function loadRecentTxs(){
   }catch(e){console.warn(e);el.textContent="Could not load recent transactions.";}
 }
 
+// NEW: load transactions for any address into a target element
+async function loadAddressTxs(address, targetId){
+  const el = document.getElementById(targetId);
+  if (!el) return;
+  if (!address || !ethers.isAddress(address)) { el.textContent = "Enter a valid 0x address."; return; }
+  if (!state.provider || typeof state.provider.getHistory !== 'function') {
+    el.textContent = "RPC doesn’t support history on this network.";
+    return;
+  }
+  el.textContent = "Loading…";
+  try {
+    const hist = await state.provider.getHistory(address);
+    const recent = (hist || []).slice(-10).reverse();
+    el.innerHTML = recent.map(t=>{
+      const when = t.timestamp ? new Date(t.timestamp*1000).toLocaleString() : "";
+      return `<div><a target=_blank href="https://sepolia.etherscan.io/tx/${t.hash}">${t.hash.slice(0,10)}…</a> • ${when}</div>`;
+    }).join('') || "No recent txs.";
+  } catch (e) {
+    console.warn(e);
+    el.textContent = "Could not load transactions for this address.";
+  }
+}
+
 /* ================================
-   SafeSend + Send flow (ethers v6)
+   SafeSend (optional) + Send flow
 ================================ */
 async function fetchSafeSend(address){
   try{
@@ -322,37 +352,29 @@ async function fetchSafeSend(address){
 }
 
 async function sendEthFlow(){
-  const to=$("#sendTo")?.value?.trim();
-  const amt=$("#sendAmt")?.value?.trim();
+  const to=$("#sendTo").value.trim();
+  const amt=$("#sendAmt").value.trim();
   if(!ethers.isAddress(to)) return alert("Invalid recipient");
   const n=Number(amt); if(isNaN(n)||n<=0) return alert("Invalid amount");
   const acct=state.accounts[state.signerIndex];
   if(!acct||!state.provider) return alert("Unlock first");
-
-  const out=$("#sendOut"); if(out) out.textContent="Checking SafeSend…";
+  $("#sendOut").textContent="Checking SafeSend…";
   const check=await fetchSafeSend(to);
-  if(check.score>70){ if(out) out.textContent=`Blocked (score ${check.score})`; return; }
-  if(out) out.textContent=`SafeSend OK (${check.score}). Sending…`;
-
+  if(check.score>70){$("#sendOut").textContent=`Blocked (score ${check.score})`;return;}
+  $("#sendOut").textContent=`SafeSend OK (${check.score}). Sending…`;
   try{
     const signer=acct.wallet.connect(state.provider);
-    const tx={ to, value: ethers.parseEther(String(n)) };
-
-    // Ethers v6: fee data from the PROVIDER (not signer)
-    const fee = await state.provider.getFeeData();
-    if (fee && fee.maxFeePerGas) {
-      tx.maxFeePerGas = fee.maxFeePerGas;
-      tx.maxPriorityFeePerGas = fee.maxPriorityFeePerGas;
-    }
-
-    // Optional: estimate gas
+    const tx={ to, value:ethers.parseEther(String(n)) };
+    const fee=await state.provider.getFeeData(); // ethers v6 on JsonRpcProvider
+    if(fee.maxFeePerGas){ tx.maxFeePerGas=fee.maxFeePerGas; tx.maxPriorityFeePerGas=fee.maxPriorityFeePerGas; }
     try { tx.gasLimit = await signer.estimateGas(tx); } catch {}
-
     const sent=await signer.sendTransaction(tx);
-    if(out) out.innerHTML=`Broadcasted: <a target=_blank href="https://sepolia.etherscan.io/tx/${sent.hash}">${sent.hash}</a>`;
+    $("#sendOut").innerHTML=`Broadcasted: <a target=_blank href="https://sepolia.etherscan.io/tx/${sent.hash}">${sent.hash}</a>`;
     await sent.wait(1);
-    loadRecentTxs();
-  }catch(e){ if(out) out.textContent="Error: "+(e.message||e); }
+    // refresh both panels
+    loadRecentTxs();                 // your account
+    loadAddressTxs(to, 'rxList');    // recipient
+  }catch(e){$("#sendOut").textContent="Error: "+(e.message||e);}
 }
 
-}); // end DOMContentLoaded
+}); // DOMContentLoaded

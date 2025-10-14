@@ -1,5 +1,5 @@
 // =========================================
-// X-Wallet v1.3 — Control Center Edition
+// X-Wallet v1.3 — Control Center Edition (fixed optional chaining errors)
 // =========================================
 import { ethers } from "https://esm.sh/ethers@6.13.2";
 
@@ -54,8 +54,7 @@ const state = {
   provider:null,
   decryptedPhrase:null,
   accounts:[],
-  signerIndex:0,
-  xmtp: null
+  signerIndex:0
 };
 
 function getVault(){ const s = localStorage.getItem(STORAGE_KEY_VAULT); return s ? JSON.parse(s) : null; }
@@ -69,9 +68,8 @@ function lock(){
   state.decryptedPhrase=null;
   state.accounts=[];
   state.signerIndex=0;
-  if (window._xmtpStreamCancel) { try{ window._xmtpStreamCancel(); }catch{} window._xmtpStreamCancel=null; }
-  state.xmtp=null;
-  $("#lockState")?.textContent="Locked";
+  const el = $("#lockState");
+  if (el) el.textContent = "Locked";
 }
 function scheduleAutoLock(){
   clearTimeout(window._inactivityTimer);
@@ -92,71 +90,6 @@ function loadAccountsFromPhrase(phrase){
     const w=deriveAccountFromPhrase(phrase,i);
     state.accounts.push({index:i,wallet:w,address:w.address});
   }
-}
-
-/* ================================
-   XMTP helpers (V3-friendly)
-================================ */
-async function ensureXMTP() {
-  try{
-    const XMTP = window.XMTP; // expect index.html to provide (V3 ideally)
-    if (!XMTP?.Client) throw new Error("XMTP Client not available");
-    if (state.xmtp) return state.xmtp;
-
-    const signerWallet = state.accounts?.[state.signerIndex]?.wallet;
-    if (!signerWallet) throw new Error("Unlock and have at least one wallet");
-
-    // xmtp-js v12 supports ethers v6 Signer with signMessage
-    const client = await XMTP.Client.create(
-      {
-        getAddress: async () => signerWallet.address,
-        signMessage: async (msg) => await signerWallet.signMessage(msg)
-      },
-      { env: 'production' }
-    );
-    state.xmtp = client;
-    return client;
-  }catch(e){
-    console.warn("XMTP init failed", e);
-    state.xmtp = null;
-    return null;
-  }
-}
-
-// Inbox helper
-async function loadInbox() {
-  const box = document.getElementById('inbox');
-  if (!box) return;
-
-  if (!state.xmtp) {
-    box.textContent = 'XMTP not available or needs V3.';
-    return;
-  }
-
-  const convos = await state.xmtp.conversations.list();
-  const latest = [];
-  for (const c of convos.slice(0, 20)) {
-    const msgs = await c.messages({ pageSize: 1, direction: 'descending' });
-    if (msgs.length) {
-      latest.push({
-        peer: c.peerAddress,
-        text: msgs[0].content,
-        at:   msgs[0].sent
-      });
-    }
-  }
-  latest.sort((a, b) => b.at - a.at);
-
-  box.innerHTML = latest.length
-    ? latest.map(m => `
-        <div class="kv">
-          <div>${m.peer}</div>
-          <div>${new Date(m.at).toLocaleString()}</div>
-        </div>
-        <div class="small">${String(m.text)}</div>
-        <hr class="sep"/>
-      `).join('')
-    : 'No messages yet.';
 }
 
 /* ================================
@@ -199,7 +132,6 @@ const VIEWS={
 
     return `<div class="label">Control Center</div><hr class="sep"/>${createImport}${manage}`;
   },
-
   wallets(){
     const rows=state.accounts.map(a=>`
       <tr><td>${a.index+1}</td><td class="mono">${a.address}</td><td id="bal-${a.index}">—</td></tr>`).join("");
@@ -207,7 +139,6 @@ const VIEWS={
       <table class="table small"><thead><tr><th>#</th><th>Address</th><th>ETH</th></tr></thead><tbody>${rows}</tbody></table>
       <div id="totalBal" class="small"></div>`;
   },
-
   send(){
     const acctOpts=state.accounts.map(a=>`<option value="${a.index}" ${a.index===state.signerIndex?"selected":""}>
       Wallet #${a.index+1} — ${a.address.slice(0,6)}…${a.address.slice(-4)}</option>`).join("")||"<option disabled>No wallets</option>";
@@ -221,28 +152,6 @@ const VIEWS={
       <div id="sendOut" class="small"></div>
       <hr class="sep"/><div class="label">Last 10 Transactions</div><div id="txList" class="small">—</div>`;
   },
-
-  messaging(){
-    return `
-      <div class="label">XMTP Messaging</div>
-      <div id="msgStatus" class="small">Status: ${state.xmtp ? 'Connected' : 'Disconnected'}</div>
-      <hr class="sep"/>
-      <div class="grid-2">
-        <div>
-          <div class="label">Start new chat</div>
-          <input id="peer" placeholder="Recipient EVM address (0x...)"/>
-          <div style="height:8px"></div>
-          <div class="flex"><input id="msg" placeholder="Type a message" style="flex:1"/><button class="btn primary" id="sendMsg">Send</button></div>
-          <div id="sendMsgOut" class="small"></div>
-        </div>
-        <div>
-          <div class="label">Inbox (live)</div>
-          <div id="inbox" class="small">—</div>
-        </div>
-      </div>
-    `;
-  },
-
   settings(){
     return `<div class="label">Settings</div><button class="btn" id="wipe">Delete vault (local)</button>`;
   }
@@ -259,11 +168,11 @@ function render(view){
   // ---- dashboard handlers ----
   if(view==="dashboard"){
     $("#gen")?.addEventListener("click",()=>{
-      $("#mnemonic").value=ethers.Mnemonic.fromEntropy(ethers.randomBytes(16)).phrase;
+      const mnEl=$("#mnemonic"); if(mnEl) mnEl.value=ethers.Mnemonic.fromEntropy(ethers.randomBytes(16)).phrase;
     });
     $("#save")?.addEventListener("click",async()=>{
-      const m=$("#mnemonic").value.trim();
-      const pw=$("#password").value;
+      const m=$("#mnemonic")?.value.trim();
+      const pw=$("#password")?.value;
       if(!m||!pw) return alert("Mnemonic + password required");
       const enc=await aesEncrypt(pw,m);
       setVault({version:1,enc});
@@ -272,8 +181,8 @@ function render(view){
       render("dashboard");
     });
     $("#doImport")?.addEventListener("click",async()=>{
-      const m=$("#mnemonicIn").value.trim();
-      const pw=$("#passwordIn").value;
+      const m=$("#mnemonicIn")?.value.trim();
+      const pw=$("#passwordIn")?.value;
       if(!m||!pw) return alert("Mnemonic + password required");
       const enc=await aesEncrypt(pw,m);
       setVault({version:1,enc});
@@ -304,53 +213,6 @@ function render(view){
     loadRecentTxs();
   }
 
-  // ---- messaging ----
-  if(view==="messaging"){
-    (async ()=>{
-      // initialize if possible
-      if (!state.xmtp && state.unlocked) {
-        await ensureXMTP();
-      }
-      $("#msgStatus").textContent = 'Status: ' + (state.xmtp ? 'Connected' : 'Disconnected (unlock or update XMTP)');
-
-      // send button
-      $("#sendMsg")?.addEventListener("click", async ()=>{
-        const out = $("#sendMsgOut");
-        if (!state.xmtp) { out.textContent='XMTP not available (update to V3)'; return; }
-        const peer = $("#peer").value.trim();
-        const txt  = $("#msg").value.trim();
-        if (!ethers.isAddress(peer)) { out.textContent='Enter valid 0x address'; return; }
-        try{
-          const convo = await state.xmtp.conversations.newConversation(peer);
-          await convo.send(txt || '(no text)');
-          out.textContent='Sent ✅';
-          $("#msg").value='';
-          await loadInbox();
-        }catch(e){ out.textContent='Error: ' + (e.message||e); }
-      });
-
-      // live inbox (if client exists)
-      if (state.xmtp) {
-        $("#inbox").textContent = 'Loading…';
-        await loadInbox();
-
-        if (window._xmtpStreamCancel) { try{ window._xmtpStreamCancel(); }catch{} window._xmtpStreamCancel=null; }
-        const stream = await state.xmtp.conversations.streamAllMessages();
-        let cancelled = false;
-        window._xmtpStreamCancel = () => { cancelled = true; try{ stream.return?.(); }catch{} };
-
-        (async () => {
-          for await (const _msg of stream) {
-            if (cancelled) break;
-            await loadInbox();
-          }
-        })();
-      } else {
-        $("#inbox").textContent = 'XMTP not available or needs V3.';
-      }
-    })();
-  }
-
   // ---- settings ----
   if(view==="settings"){
     $("#wipe")?.addEventListener("click",()=>{
@@ -368,25 +230,26 @@ function selectItem(view){$$(".sidebar .item").forEach(x=>x.classList.toggle("ac
 $$(".sidebar .item").forEach(el=>el.onclick=()=>selectItem(el.dataset.view));
 selectItem("dashboard");
 
-function showLock(){ $("#lockModal").classList.add("active"); $("#unlockPassword").value=""; $("#unlockMsg").textContent=""; }
-function hideLock(){ $("#lockModal").classList.remove("active"); }
+function showLock(){ const lm=$("#lockModal"); if(lm){ lm.classList.add("active"); } const up=$("#unlockPassword"); if(up){ up.value=""; } const um=$("#unlockMsg"); if(um){ um.textContent=""; } }
+function hideLock(){ const lm=$("#lockModal"); if(lm){ lm.classList.remove("active"); } }
+
 $("#btnLock")?.addEventListener("click",()=>{lock();alert("Locked");});
 $("#btnUnlock")?.addEventListener("click",()=>showLock());
 $("#cancelUnlock")?.addEventListener("click",()=>hideLock());
 $("#doUnlock")?.addEventListener("click",async()=>{
   try{
-    const v=getVault(); if(!v){$("#unlockMsg").textContent="No vault found.";return;}
-    const pw=$("#unlockPassword").value;
+    const v=getVault(); if(!v){const um=$("#unlockMsg"); if(um) um.textContent="No vault found.";return;}
+    const pw=$("#unlockPassword")?.value;
     const phrase=await aesDecrypt(pw,v.enc);
     state.decryptedPhrase=phrase;
     if(!getAccountCount()) setAccountCount(1);
     loadAccountsFromPhrase(phrase);
     state.provider=new ethers.JsonRpcProvider(RPCS.sep);
     state.unlocked=true;
-    $("#lockState").textContent="Unlocked";
+    const ls=$("#lockState"); if(ls) ls.textContent="Unlocked";
     hideLock();scheduleAutoLock();
     selectItem("dashboard");
-  }catch(e){console.error(e);$("#unlockMsg").textContent="Wrong password or corrupted vault.";}
+  }catch(e){console.error(e);const um=$("#unlockMsg"); if(um) um.textContent="Wrong password or corrupted vault.";}
 });
 
 /* ================================
@@ -399,10 +262,12 @@ async function loadWalletBalances(){
     try{
       const b=await state.provider.getBalance(a.address);
       total+=b;
-      $(`#bal-${a.index}`).textContent=ethers.formatEther(b);
+      const be = $(`#bal-${a.index}`);
+      if (be) be.textContent=ethers.formatEther(b);
     }catch{}
   }
-  $("#totalBal").textContent="Total (ETH): "+ethers.formatEther(total);
+  const tb=$("#totalBal");
+  if(tb) tb.textContent="Total (ETH): "+ethers.formatEther(total);
 }
 
 async function loadRecentTxs(){
@@ -436,16 +301,17 @@ async function fetchSafeSend(address){
 }
 
 async function sendEthFlow(){
-  const to=$("#sendTo").value.trim();
-  const amt=$("#sendAmt").value.trim();
+  const to=$("#sendTo")?.value.trim();
+  const amt=$("#sendAmt")?.value.trim();
   if(!ethers.isAddress(to)) return alert("Invalid recipient");
   const n=Number(amt); if(isNaN(n)||n<=0) return alert("Invalid amount");
   const acct=state.accounts[state.signerIndex];
   if(!acct||!state.provider) return alert("Unlock first");
-  $("#sendOut").textContent="Checking SafeSend…";
+  const so=$("#sendOut");
+  if(so) so.textContent="Checking SafeSend…";
   const check=await fetchSafeSend(to);
-  if(check.score>70){$("#sendOut").textContent=`Blocked (score ${check.score})`;return;}
-  $("#sendOut").textContent=`SafeSend OK (${check.score}). Sending…`;
+  if(check.score>70){if(so) so.textContent=`Blocked (score ${check.score})`;return;}
+  if(so) so.textContent=`SafeSend OK (${check.score}). Sending…`;
   try{
     const signer=acct.wallet.connect(state.provider);
     const tx={to,value:ethers.parseEther(String(n))};
@@ -453,10 +319,10 @@ async function sendEthFlow(){
     if(fee.maxFeePerGas){tx.maxFeePerGas=fee.maxFeePerGas;tx.maxPriorityFeePerGas=fee.maxPriorityFeePerGas;}
     tx.gasLimit=await signer.estimateGas(tx);
     const sent=await signer.sendTransaction(tx);
-    $("#sendOut").innerHTML=`Broadcasted: <a target=_blank href="https://sepolia.etherscan.io/tx/${sent.hash}">${sent.hash}</a>`;
+    if(so) so.innerHTML=`Broadcasted: <a target=_blank href="https://sepolia.etherscan.io/tx/${sent.hash}">${sent.hash}</a>`;
     await sent.wait(1);
     loadRecentTxs();
-  }catch(e){$("#sendOut").textContent="Error: "+(e.message||e);}
+  }catch(e){if(so) so.textContent="Error: "+(e.message||e);}
 }
 
 }); // end DOMContentLoaded

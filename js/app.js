@@ -10,7 +10,7 @@ document.addEventListener("DOMContentLoaded", () => {
 ================================ */
 const RPCS = {
   // Replace with your real Alchemy Sepolia RPC URL
-  sep: "https://eth-sepolia.g.alchemy.com/v2/REPLACE_WITH_YOUR_KEY",
+  sep: "https://eth-sepolia.g.alchemy.com/v2/kxHg5y9yBXWAb9cOcJsf0",
 };
 
 // Optional SafeSend (used in send flow text; OK to leave as-is)

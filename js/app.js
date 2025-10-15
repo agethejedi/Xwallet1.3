@@ -1,5 +1,5 @@
 // =========================================
-// X-Wallet v1.3 — Control Center + Recent TXs
+// X-Wallet v1.3 — Control Center + Recent TXs (Etherscan history)
 // =========================================
 import { ethers } from "https://esm.sh/ethers@6.13.2";
 
@@ -10,11 +10,16 @@ document.addEventListener("DOMContentLoaded", () => {
 ================================ */
 const RPCS = {
   // Replace with your real Alchemy Sepolia RPC URL
-   sep: "https://eth-sepolia.g.alchemy.com/v2/kxHg5y9yBXWAb9cOcJsf0",
+  sep: "https://eth-sepolia.g.alchemy.com/v2/kxHg5y9yBXWAb9cOcJsf0",
 };
 
 // Optional SafeSend (used in send flow text; OK to leave as-is)
 const SAFE_SEND_URL = "https://xwalletv1dot2.agedotcom.workers.dev/check";
+
+// --- Etherscan for History (separate from the RPC) ---
+const ETHERSCAN_API_KEY = ""; // <-- optional but recommended (free)
+// History provider (Sepolia)
+const historyProvider = new ethers.EtherscanProvider("sepolia", ETHERSCAN_API_KEY || undefined);
 
 /* ================================
    Tiny helpers
@@ -255,7 +260,7 @@ function render(view){
 /* ================================
    Navigation + lock modal
 ================================ */
-function selectItem(view){$$(".sidebar .item").forEach(x=>x.classList.toggle("active",x.dataset.view===view));render(view);}
+function selectItem(view){$$(".sidebar .item").forEach(x=>x.classList.toggle("active", x.dataset.view===view));render(view);}
 $$(".sidebar .item").forEach(el=>el.onclick=()=>selectItem(el.dataset.view));
 selectItem("dashboard");
 
@@ -298,14 +303,14 @@ async function loadWalletBalances(){
   if (tb) tb.textContent = "Total (ETH): " + ethers.formatEther(total);
 }
 
+// ----- History via Etherscan (NOT RPC) -----
 async function loadRecentTxs(){
   const el=$("#txList"); if(!el) return;
   el.textContent="Loading…";
   try{
     const acct=state.accounts[state.signerIndex];
     if(!acct){el.textContent="No wallet selected.";return;}
-    if(!state.provider.getHistory){el.textContent="No history available for this RPC.";return;}
-    const hist=await state.provider.getHistory(acct.address);
+    const hist=await historyProvider.getHistory(acct.address);
     const recent=(hist||[]).slice(-10).reverse();
     el.innerHTML=recent.map(t=>{
       const when=t.timestamp?new Date(t.timestamp*1000).toLocaleString():"";
@@ -314,18 +319,13 @@ async function loadRecentTxs(){
   }catch(e){console.warn(e);el.textContent="Could not load recent transactions.";}
 }
 
-// NEW: load transactions for any address into a target element
 async function loadAddressTxs(address, targetId){
   const el = document.getElementById(targetId);
   if (!el) return;
   if (!address || !ethers.isAddress(address)) { el.textContent = "Enter a valid 0x address."; return; }
-  if (!state.provider || typeof state.provider.getHistory !== 'function') {
-    el.textContent = "RPC doesn’t support history on this network.";
-    return;
-  }
   el.textContent = "Loading…";
   try {
-    const hist = await state.provider.getHistory(address);
+    const hist = await historyProvider.getHistory(address);
     const recent = (hist || []).slice(-10).reverse();
     el.innerHTML = recent.map(t=>{
       const when = t.timestamp ? new Date(t.timestamp*1000).toLocaleString() : "";

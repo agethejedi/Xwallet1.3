@@ -17,7 +17,7 @@ const RPCS = {
 const SAFE_SEND_URL = "https://xwalletv1dot2.agedotcom.workers.dev/check";
 
 // --- Etherscan for History (separate from the RPC) ---
-const ETHERSCAN_API_KEY = ""; // <-- optional but recommended (free)
+const ETHERSCAN_API_KEY = "ZPH9HC5SV7SYCSPZU8R9S49TIIIVUZG35H"; // <-- optional but recommended (free)
 // History provider (Sepolia)
 const historyProvider = new ethers.EtherscanProvider("sepolia", ETHERSCAN_API_KEY || undefined);
 

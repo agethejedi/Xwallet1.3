@@ -428,4 +428,3 @@ async function sendEthFlow(){
 }
 
 }); // DOMContentLoaded
-

@@ -387,11 +387,7 @@ async function loadAddressTxs(address, targetId){
     }).join('');
   } catch (e) {
     console.warn(e);
-    el.textContent = "Could not load transactions for this address.";
-  }
-}
-
-/* ================================
+    el.textContent = "Could not load transactions for this /* ================================
    SafeSend (optional) + Send flow
 ================================ */
 async function fetchSafeSend(address){
@@ -432,3 +428,4 @@ async function sendEthFlow(){
 }
 
 }); // DOMContentLoaded
+

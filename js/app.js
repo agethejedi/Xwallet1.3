@@ -1,5 +1,5 @@
 // =========================================
-// X-Wallet v1.3 — Control Center + Recent TXs (Etherscan-powered)
+// X-Wallet v1.3 — Control Center + Recent TXs (Alchemy transfers)
 // =========================================
 import { ethers } from "https://esm.sh/ethers@6.13.2";
 
@@ -8,17 +8,13 @@ document.addEventListener("DOMContentLoaded", () => {
 /* ================================
    CONFIG
 ================================ */
-// Replace with your actual Alchemy Sepolia RPC (works for balances/sends)
+// Replace with your actual Alchemy Sepolia RPC (balances, sends, history)
 const RPCS = {
-  sep: "https://eth-sepolia.g.alchemy.com/v2/kxHg5y9yBXWAb9cOcJsf0",
+  sep: "https://eth-sepolia.g.alchemy.com/v2/REPLACE_WITH_YOUR_KEY",
 };
 
 // SafeSend Worker (optional pre-check before sending)
 const SAFE_SEND_URL = "https://xwalletv1dot2.agedotcom.workers.dev/check";
-
-// ---- Etherscan (Sepolia) for transaction history ----
-const ETHERSCAN_API_KEY = "ZPH9HC5SV7SYCSPZU8R9S49TIIIVUZG35H"; // <— put your key
-const ETHERSCAN_BASE    = "https://api-sepolia.etherscan.io";
 
 /* ================================
    Tiny helpers
@@ -96,35 +92,53 @@ function loadAccountsFromPhrase(phrase){
 }
 
 /* ================================
-   Etherscan history helpers
+   Alchemy transfers (history)
 ================================ */
-async function getTxsEtherscan(address, { limit = 10, direction = "desc" } = {}) {
+async function getTxsAlchemy(address, { limit = 10 } = {}) {
+  if (!state.provider) throw new Error("Provider not ready");
   if (!ethers.isAddress(address)) return [];
-  const params = new URLSearchParams({
-    module: "account",
-    action: "txlist",
-    address,
-    startblock: "0",
-    endblock: "99999999",
-    sort: direction,          // 'asc' | 'desc'
-    page: "1",
-    offset: String(limit),
-    apikey: ETHERSCAN_API_KEY || ""
-  });
-  const url = `${ETHERSCAN_BASE}/api?${params.toString()}`;
-  // For debugging in DevTools Network tab:
-  // console.log("[etherscan] GET", url);
 
-  const res = await fetch(url);
-  if (!res.ok) throw new Error("etherscan_http_" + res.status);
-  const json = await res.json();
+  // Fetch outgoing + incoming externals, merge & sort desc by timestamp
+  const paramsOut = [{
+    fromBlock: "0x0",
+    toBlock: "latest",
+    category: ["external"],
+    withMetadata: true,
+    excludeZeroValue: false,
+    maxCount: "0x" + limit.toString(16),
+    order: "desc",
+    fromAddress: address
+  }];
 
-  // json.status === "1" means OK; otherwise could be "0"/"No transactions found" etc
-  if (json.status !== "1" || !Array.isArray(json.result)) {
-    // If rate limited or no txs, this safely returns []
-    return [];
-  }
-  return json.result;
+  const paramsIn = [{
+    fromBlock: "0x0",
+    toBlock: "latest",
+    category: ["external"],
+    withMetadata: true,
+    excludeZeroValue: false,
+    maxCount: "0x" + limit.toString(16),
+    order: "desc",
+    toAddress: address
+  }];
+
+  const [outRes, inRes] = await Promise.all([
+    state.provider.send("alchemy_getAssetTransfers", paramsOut).catch(() => ({ transfers: [] })),
+    state.provider.send("alchemy_getAssetTransfers", paramsIn).catch(() => ({ transfers: [] }))
+  ]);
+
+  const out = outRes?.transfers || [];
+  const inn = inRes?.transfers || [];
+
+  const all = [...out, ...inn].map(t => ({
+    hash: t.hash,
+    from: t.from,
+    to: t.to,
+    value: t.value, // numeric string in ETH for external transfers (Alchemy)
+    timestamp: t.metadata?.blockTimestamp ? Date.parse(t.metadata.blockTimestamp) : 0
+  }));
+
+  all.sort((a, b) => b.timestamp - a.timestamp);
+  return all.slice(0, limit);
 }
 
 /* ================================
@@ -273,8 +287,8 @@ function render(view){
     toEl?.addEventListener('blur', updateRx);
 
     // initial loads
-    loadRecentTxs(); // your account (etherscan)
-    updateRx();      // recipient if prefilled (etherscan)
+    loadRecentTxs(); // your account (Alchemy)
+    updateRx();      // recipient if prefilled (Alchemy)
   }
 
   // ---- settings ----
@@ -339,11 +353,16 @@ async function loadRecentTxs(){
   try{
     const acct=state.accounts[state.signerIndex];
     if(!acct){el.textContent="No wallet selected.";return;}
-    const txs = await getTxsEtherscan(acct.address, { limit: 10, direction: "desc" });
+    const txs = await getTxsAlchemy(acct.address, { limit: 10 });
     if (!txs.length) { el.textContent = "No recent txs."; return; }
     el.innerHTML=txs.map(t=>{
-      const when=t.timeStamp?new Date(Number(t.timeStamp)*1000).toLocaleString():"";
-      return `<div><a target=_blank href="https://sepolia.etherscan.io/tx/${t.hash}">${t.hash.slice(0,10)}…</a> • ${when}</div>`;
+      const when=t.timestamp?new Date(t.timestamp).toLocaleString():"";
+      return `<div>
+        <a target=_blank href="https://sepolia.etherscan.io/tx/${t.hash}">${t.hash.slice(0,10)}…</a>
+        • ${when}
+        • ${t.from?.slice(0,6)}… → ${t.to?.slice(0,6)}…
+        ${t.value != null ? `• ${t.value} ETH` : ""}
+      </div>`;
     }).join("");
   }catch(e){console.warn(e);el.textContent="Could not load recent transactions.";}
 }
@@ -355,11 +374,16 @@ async function loadAddressTxs(address, targetId){
   if (!address || !ethers.isAddress(address)) { el.textContent = "Enter a valid 0x address."; return; }
   el.textContent = "Loading…";
   try {
-    const txs = await getTxsEtherscan(address, { limit: 10, direction: "desc" });
+    const txs = await getTxsAlchemy(address, { limit: 10 });
     if (!txs.length) { el.textContent = "No recent txs."; return; }
     el.innerHTML = txs.map(t=>{
-      const when = t.timeStamp ? new Date(Number(t.timeStamp)*1000).toLocaleString() : "";
-      return `<div><a target=_blank href="https://sepolia.etherscan.io/tx/${t.hash}">${t.hash.slice(0,10)}…</a> • ${when}</div>`;
+      const when = t.timestamp ? new Date(t.timestamp).toLocaleString() : "";
+      return `<div>
+        <a target=_blank href="https://sepolia.etherscan.io/tx/${t.hash}">${t.hash.slice(0,10)}…</a>
+        • ${when}
+        • ${t.from?.slice(0,6)}… → ${t.to?.slice(0,6)}…
+        ${t.value != null ? `• ${t.value} ETH` : ""}
+      </div>`;
     }).join('');
   } catch (e) {
     console.warn(e);
@@ -402,8 +426,8 @@ async function sendEthFlow(){
     $("#sendOut").innerHTML=`Broadcasted: <a target=_blank href="https://sepolia.etherscan.io/tx/${sent.hash}">${sent.hash}</a>`;
     await sent.wait(1);
     // refresh both panels
-    loadRecentTxs();                 // your account (etherscan)
-    loadAddressTxs(to, 'rxList');    // recipient (etherscan)
+    loadRecentTxs();                 // your account (Alchemy)
+    loadAddressTxs(to, 'rxList');    // recipient (Alchemy)
   }catch(e){$("#sendOut").textContent="Error: "+(e.message||e);}
 }
 

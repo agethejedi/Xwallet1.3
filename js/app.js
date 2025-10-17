@@ -1,5 +1,5 @@
 // =========================================
-// X-Wallet v1.3 — Control Center + Recent TXs (Etherscan V2 history)
+// X-Wallet v1.3 — Control Center + Recent TXs (Etherscan txlist)
 // =========================================
 import { ethers } from "https://esm.sh/ethers@6.13.2";
 
@@ -8,16 +8,16 @@ document.addEventListener("DOMContentLoaded", () => {
 /* ================================
    CONFIG
 ================================ */
-// Your Alchemy Sepolia RPC (used for balances and sends)
+// Your Alchemy Sepolia RPC (balances & sends)
 const RPCS = {
-  sep: "https://eth-sepolia.g.alchemy.com/v2/kxHg5y9yBXWAb9cOcJsf0",
+  sep: "https://eth-sepolia.g.alchemy.com/v2/kxHg5y9yBXWAb9cOcJsf0", // <-- keep your real key here
 };
 
 // Optional SafeSend (pre-check before sending)
 const SAFE_SEND_URL = "https://xwalletv1dot2.agedotcom.workers.dev/check";
 
-// Etherscan (Sepolia) V2 for transaction history
-const ETHERSCAN_API_KEY = "ZPH9HC5SV7SYCSPZU8R9S49TIIIVUZG35H";
+// Etherscan (Sepolia) for transaction history
+const ETHERSCAN_API_KEY = "ZPH9HC5SV7SYCSPZU8R9S49TIIIVUZG35H"; // <-- your key
 const ETHERSCAN_BASE    = "https://api-sepolia.etherscan.io";
 
 /* ================================
@@ -96,31 +96,34 @@ function loadAccountsFromPhrase(phrase){
 }
 
 /* ================================
-   Etherscan V2 history
+   Etherscan history (KNOWN-GOOD)
 ================================ */
 async function getTxsEtherscan(address, { limit = 10, direction = "desc" } = {}) {
   if (!ethers.isAddress(address)) return [];
-  // V2 endpoint parameters (page/offset/sort still apply; response shape differs from V1)
+
   const params = new URLSearchParams({
     module: "account",
-    action: "txs",           // V2 action
+    action: "txlist",     // <- this is the legacy but working endpoint
     address,
+    startblock: "0",
+    endblock: "99999999",
     page: "1",
     offset: String(limit),
-    sort: direction,         // 'asc' | 'desc'
-    apikey: ETHERSCAN_API_KEY || ""
+    sort: direction,      // 'asc' | 'desc'
+    apikey: ETHERSCAN_API_KEY
   });
+
   const url = `${ETHERSCAN_BASE}/api?${params.toString()}`;
   const res = await fetch(url);
   if (!res.ok) throw new Error("etherscan_http_" + res.status);
-  const json = await res.json();
 
-  // V2 returns { status, message, result }, but result items have V2 fields.
+  const json = await res.json();
   if (json.status !== "1" || !Array.isArray(json.result)) return [];
-  // Normalize a tiny bit so the rendering below can reuse timeStamp/hash
+
+  // Normalize minimal fields for renderer
   return json.result.map(it => ({
     hash: it.hash,
-    timeStamp: it.timeStamp || it.timeStamp?.toString?.(),
+    timeStamp: it.timeStamp
   }));
 }
 
@@ -256,7 +259,7 @@ function render(view){
   if(view==="send"){
     $("#fromAccount")?.addEventListener("change",(e)=>{
       state.signerIndex=Number(e.target.value);
-      loadRecentTxs();  // update "your" recent txs when switching wallet
+      loadRecentTxs();  // update your recent txs when switching wallet
     });
 
     $("#doSend")?.addEventListener("click",sendEthFlow);
@@ -270,8 +273,8 @@ function render(view){
     toEl?.addEventListener('blur', updateRx);
 
     // initial loads
-    loadRecentTxs(); // your account (Etherscan V2)
-    updateRx();      // recipient if prefilled (Etherscan V2)
+    loadRecentTxs(); // your account (Etherscan)
+    updateRx();      // recipient if prefilled (Etherscan)
   }
 
   // ---- settings ----
@@ -345,7 +348,6 @@ async function loadRecentTxs(){
   }catch(e){console.warn(e);el.textContent="Could not load recent transactions.";}
 }
 
-// Recipient panel
 async function loadAddressTxs(address, targetId){
   const el = document.getElementById(targetId);
   if (!el) return;
@@ -398,9 +400,8 @@ async function sendEthFlow(){
     const sent=await signer.sendTransaction(tx);
     $("#sendOut").innerHTML=`Broadcasted: <a target=_blank href="https://sepolia.etherscan.io/tx/${sent.hash}">${sent.hash}</a>`;
     await sent.wait(1);
-    // refresh both panels
-    loadRecentTxs();                 // your account
-    loadAddressTxs(to, 'rxList');    // recipient
+    loadRecentTxs();
+    loadAddressTxs(to, 'rxList');
   }catch(e){$("#sendOut").textContent="Error: "+(e.message||e);}
 }
 

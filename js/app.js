@@ -10,14 +10,14 @@ document.addEventListener("DOMContentLoaded", () => {
 ================================ */
 // Your Alchemy Sepolia RPC (used for balances and sends)
 const RPCS = {
-  sep: "https://eth-sepolia.g.alchemy.com/v2/REPLACE_WITH_YOUR_ALCHEMY_KEY",
+  sep: "https://eth-sepolia.g.alchemy.com/v2/kxHg5y9yBXWAb9cOcJsf0",
 };
 
 // Optional SafeSend (pre-check before sending)
 const SAFE_SEND_URL = "https://xwalletv1dot2.agedotcom.workers.dev/check";
 
 // Etherscan (Sepolia) V2 for transaction history
-const ETHERSCAN_API_KEY = "REPLACE_WITH_YOUR_ETHERSCAN_KEY";
+const ETHERSCAN_API_KEY = "ZPH9HC5SV7SYCSPZU8R9S49TIIIVUZG35H";
 const ETHERSCAN_BASE    = "https://api-sepolia.etherscan.io";
 
 /* ================================
